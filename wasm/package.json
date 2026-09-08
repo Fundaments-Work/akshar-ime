@@ -12,7 +12,7 @@
     "../docs/WASM.md",
     "../README.md"
   ],
-  "keywords": ["devanagari", "nepali", "hindi", "ime", "transliteration", "wasm", "input-method"],
+  "keywords": ["devanagari", "ime", "transliteration", "wasm", "input-method"],
   "license": "MIT",
   "repository": {
     "type": "git",

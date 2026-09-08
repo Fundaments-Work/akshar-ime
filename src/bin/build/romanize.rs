@@ -3,7 +3,7 @@
 // High-Performance Multi-Threaded Cycle-Consistent Romanizer for Akshar-IME.
 //
 // Generates high-quality synthetic training pairs (Roman, Devanagari) from vocabulary:
-//   1. Canonicalize input Devanagari word using standard Nepali grammar & orthography
+//   1. Canonicalize the input Devanagari word using the orthography rules
 //      (resolves common errors: सहिद -> शहीद, बिकास -> विकास, गरीन्छ -> गरिन्छ, etc.).
 //   2. Backward romanization: segment into aksharas and generate Roman chunks from EM emissions,
 //      plus natural user phonetic typing mutations (b/v/w, ee/i, oo/u, s/sh, ch/chh).

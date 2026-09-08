@@ -1,7 +1,7 @@
 // File: src/bin/evaluate_aksharantar.rs
 //
 // Product-level benchmark: the IME engine (generative decoder + lexicon +
-// learning) against the held-out Aksharantar Nepali test split (4,101 pairs).
+// learning) against the held-out Aksharantar test split (4,101 pairs).
 //
 // The split mirrors the Aksharantar paper:
 //   native words     = AK-Freq source   (IndicXlit top-1: 80.25)
@@ -155,7 +155,7 @@ fn main() {
         }
     }
 
-    println!("Aksharantar Nepali test split: {} cases", cases.len());
+    println!("Aksharantar test split: {} cases", cases.len());
     println!("IndicXlit (neural, top-1) reference: native=80.25%, named-entities=52.67%");
     report.print(topk, show_misses);
 }

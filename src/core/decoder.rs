@@ -618,7 +618,7 @@ mod tests {
 
     #[test]
     fn decodes_namaste() {
-        let model = trained_model(&[("namaste", "नमस्ते"), ("nama", "नम"), ("nepal", "नेपाल")]);
+        let model = trained_model(&[("namaste", "नमस्ते"), ("nama", "नम"), ("nadi", "नदी")]);
         let dec = ModelDecoder::new(model);
         let res = dec.decode("namaste", 8);
         assert!(!res.is_empty());

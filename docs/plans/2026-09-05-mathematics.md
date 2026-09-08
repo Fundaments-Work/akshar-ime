@@ -345,7 +345,7 @@ Each external information source shrinks the effective ambiguity set:
 This is the quantitative form of the claim: isolated-word accuracy is
 bounded by the string's entropy; sentence-level accuracy is not. The
 measured plateau at ${\sim}79$–$80.7\%$ *is* the empirical entropy of
-romanized Nepali under this grammar.
+romanized input under this grammar.
 
 ---
 

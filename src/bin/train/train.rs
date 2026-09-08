@@ -126,7 +126,7 @@ fn auto_detect_pairs() -> Option<PathBuf> {
 }
 
 fn auto_detect_text() -> Option<PathBuf> {
-    let candidates = ["data/store/corpus_clean.txt", "data/raw/nepali_text.txt"];
+    let candidates = ["data/store/corpus_clean.txt", "data/raw/corpus.txt"];
     for c in candidates {
         let p = PathBuf::from(c);
         if p.exists() {
@@ -790,7 +790,7 @@ fn main() -> Result<()> {
         sparse_scale
     );
 
-    println!("Pruning unreferenced aksharas and cleaning non-Nepali transitions...");
+    println!("Pruning unreferenced aksharas and cleaning out-of-vocabulary transitions...");
     let mut seen_aks = std::collections::HashSet::new();
     for word in vocab_freq.keys() {
         for a in akshar_ime::core::akshara::segment(word) {
@@ -878,7 +878,7 @@ fn main() -> Result<()> {
     println!("\n>>> Running Self-Verification Smoke Test on newly created model...");
     let engine = ImeEngine::from_unified_file(&out_path)
         .map_err(|e| anyhow::anyhow!("load newly trained model: {e}"))?;
-    let test_queries = ["namaste", "nepal", "kathmandu", "dhanyabad", "pani"];
+    let test_queries = ["namaste", "dhanyabad", "pustak", "sarkar", "pani"];
     println!("Testing top suggestion generation for basic words:");
     for q in test_queries {
         let sugs = engine.get_suggestions(q, 3);

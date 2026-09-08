@@ -192,7 +192,7 @@ mod tests {
     }
 
     #[test]
-    fn segments_long_nepali_word() {
+    fn segments_long_word() {
         // काठमाडौं -> का, ठ, मा, डौं
         assert_eq!(segment("काठमाडौं"), vec!["का", "ठ", "मा", "डौं"]);
     }

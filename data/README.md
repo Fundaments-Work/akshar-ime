@@ -9,10 +9,10 @@ artifacts. Everything below is rebuilt locally with the pipeline in
 
 | Source | What it is | License / access |
 |---|---|---|
-| **Aksharantar** (AI4Bharat, IIT Madras) | 5.4M roman→Devanagari word pairs across Hindi + Nepali, produced by human annotators and validated with a rule-based checker. **Merged into one language-agnostic Devanagari set** — we do not treat entries as Hindi or Nepali. | CC0 / some CC-BY — download from [HuggingFace](https://huggingface.co/datasets/ai4bharat/Aksharantar) |
-| **Nepali Wikipedia** | Full article dump, text extracted from the XML. | CC-BY-SA — [dumps.wikimedia.org/newiki](https://dumps.wikimedia.org/newiki/) |
-| **CC100 Nepali** | CommonCrawl web text filtered to Devanagari by the creators. | CC0 — [data.statmt.org/cc-100](https://data.statmt.org/cc-100/) |
-| **akshar-ime news crawl** | 18,190+ full articles from Nepali news sites (gorkhapatra, onlinekhabar, nayapatrika, kanunpatrika), crawled with the private pipeline in `pipeline/pipeline.py`. Current-affairs vocabulary (ministers, dates, places) that encyclopedic sources lack. | public news; only derived counts ship |
+| **Aksharantar** (AI4Bharat, IIT Madras) | 5.4M roman→Devanagari word pairs, produced by human annotators and validated with a rule-based checker. The per-language files are **merged into one language-agnostic Devanagari set**; nothing downstream reads the language a pair came from. | CC0 / some CC-BY — download from [HuggingFace](https://huggingface.co/datasets/ai4bharat/Aksharantar) |
+| **Wikipedia** | Full article dump for the target language, text extracted from the XML. | CC-BY-SA — [dumps.wikimedia.org/newiki](https://dumps.wikimedia.org/newiki/) |
+| **CC100** | CommonCrawl web text, the portion the creators filtered to Devanagari. | CC0 — [data.statmt.org/cc-100](https://data.statmt.org/cc-100/) |
+| **akshar-ime news crawl** | 18,190+ full articles from news sites (gorkhapatra, onlinekhabar, nayapatrika, kanunpatrika), crawled with the private pipeline in `pipeline/pipeline.py`. Current-affairs vocabulary (ministers, dates, places) that encyclopedic sources lack. | public news; only derived counts ship |
 | **Your own typing** | learned on-device in `~/.config/akshar-devanagari/`, never leaves the machine | — |
 
 ## How the data is cleaned (the single rule set)
@@ -86,7 +86,7 @@ curl -sL -o /tmp/cc100-ne.txt.xz https://data.statmt.org/cc-100/ne.txt.xz
 python3 data/pipeline/filter_cc100.py /tmp/cc100-ne.txt.xz data/raw/cc100ne.txt
 # news: python3 data/pipeline/pipeline.py crawl  (articles land in the DB)
 python3 data/pipeline/build_corpus.py data/store/corpus_clean.txt \
-    --db data/store/nepali_text.db data/raw/newiki.txt data/raw/cc100ne.txt
+    --db data/store/corpus_text.db data/raw/newiki.txt data/raw/cc100ne.txt
 
 # 3. One-Shot End-to-End Model Training
 cargo run --release --bin train
@@ -109,7 +109,7 @@ make web-model
 cargo run --release --bin repack_model -- --model data/akshar.model \
   --out data/akshar.model --compact-aksharas
 
-# 4. Evaluate (Aksharantar Nepali test split: 4,101 cases)
+# 4. Evaluate (Aksharantar test split: 4,101 cases)
 cargo run --release --bin evaluate_aksharantar -- --model data/akshar.model
 ```
 

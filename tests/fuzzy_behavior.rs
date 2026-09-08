@@ -94,7 +94,7 @@ fn fuzzy_does_not_outrank_an_exact_decode() {
     // A different query that the decoder handles exactly must not be hijacked
     // by the learned neighbour: this is the failure mode that cost 30.8pp when
     // the corpus fuzzy source scored above the decoder band.
-    let got = tops(&e, "nepal", 5);
+    let got = tops(&e, "sarkar", 5);
     assert!(
         !got.is_empty() && got[0] != "पानी",
         "fuzzy match outranked the exact decode; got {got:?}"
@@ -107,13 +107,13 @@ fn vowel_length_variants_need_no_learning() {
     // Cold start, nothing confirmed: doubled-vowel spellings and the canonical
     // spelling should land on the same word via the query normalizer, not via
     // any corpus-wide fuzzy index.
-    let canonical = tops(&e, "nepali", 10);
-    let doubled = tops(&e, "nepaalee", 10);
+    let canonical = tops(&e, "sathi", 10);
+    let doubled = tops(&e, "saathee", 10);
     assert!(!canonical.is_empty() && !doubled.is_empty());
     let overlap = doubled.iter().filter(|d| canonical.contains(d)).count();
     assert!(
         overlap > 0,
-        "no shared candidate between 'nepali' {canonical:?} and 'nepaalee' {doubled:?}"
+        "no shared candidate between 'sathi' {canonical:?} and 'saathee' {doubled:?}"
     );
 }
 

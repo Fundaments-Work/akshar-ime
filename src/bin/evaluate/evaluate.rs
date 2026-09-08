@@ -1,6 +1,6 @@
 // File: src/bin/evaluate.rs
 //
-// Evaluation harness for Nepali transliteration.
+// Evaluation harness for Roman-to-Devanagari transliteration.
 //
 // Runs the IME engine over a test set and reports:
 //   * Top-1 / Top-5 / Top-10 accuracy
@@ -162,7 +162,7 @@ fn main() {
     // Bootstrap confidence intervals.
     let (top1_ci, top5_ci, top10_ci, mrr_ci) = bootstrap(&outcomes, args.resamples, args.seed);
 
-    println!("\nNepali Devanagari Transliteration Evaluation");
+    println!("\nDevanagari Transliteration Evaluation");
     println!("Dataset : {}", args.dataset.display());
     println!("Cases   : {n}");
     println!("Engine  : ImeEngine (generative decoder)");

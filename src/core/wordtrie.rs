@@ -2,7 +2,7 @@
 //
 // M4-real: a trie over real Devanagari words, keyed by akshara id, with
 // corpus frequencies at terminals.  Built from running-text counts (e.g. the
-// Nepali Wikipedia).  Intersecting the transliteration lattice with this trie
+// a Wikipedia dump).  Intersecting the transliteration lattice with this trie
 // restricts decoding to actual words — combinatorial ambiguity reduction, no
 // probability required for the pruning step.
 

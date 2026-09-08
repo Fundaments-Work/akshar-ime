@@ -49,7 +49,7 @@ impl LearningEngine {
             // indexing every single user-typed variant.
             symspell.add_word(&confirmation.roman, word_id);
             if metadata.variants.len() == 1 {
-                // First time we see this word, add its Nepali form too
+                // First time we see this word, add its Devanagari form too
                 symspell.add_word(&confirmation.devanagari, word_id);
             }
         }

@@ -5,7 +5,7 @@
 //! displacing the reranker's top-1 on every query that produced a fuzzy hit).
 //! Unit tests cannot catch that class of defect: every component was individually
 //! correct and it was their *composition* that was wrong.  This test measures
-//! end-to-end accuracy on a fixed sample of the held-out Aksharantar Nepali test
+//! end-to-end accuracy on a fixed sample of the held-out Aksharantar test
 //! split and fails if it drops.
 //!
 //! Thresholds are set below the measured baseline (2026-09-06: top-1 81.74%,

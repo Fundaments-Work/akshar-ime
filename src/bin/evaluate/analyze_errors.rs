@@ -3,7 +3,7 @@
 // E0 error-analysis harness: where does the engine lose accuracy?
 //
 // Reports, per source bucket (AK-Freq = native words, AK-NEF/AK-NEI = named
-// entities) over the Aksharantar Nepali test split:
+// entities) over the Aksharantar test split:
 //   1. Oracle top-k curves for the decoder and the full engine
 //      (gold-in-first-k for k = 1,2,3,5,8,10,20,50) -> splits RANKING error
 //      (gold generated but not ranked first) from COVERAGE error (gold never

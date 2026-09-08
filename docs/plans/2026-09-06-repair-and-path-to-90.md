@@ -6,7 +6,7 @@ changed and what it measured. Phases C-F remain open. Supersedes the baseline ar
 shipped default) and the discounting sections of `2026-09-05-mathematics.md`.
 
 All numbers below were **measured on this tree** against `data/akshar.model`
-(11.9 MB, built 2026-09-06 15:58) on the 4,101-case Aksharantar Nepali test
+(11.9 MB, built 2026-09-06 15:58) on the 4,101-case Aksharantar test
 split. Nothing was retrained.
 
 ---

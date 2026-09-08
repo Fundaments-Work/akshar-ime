@@ -1,7 +1,7 @@
 // File: src/bin/build_wordfreq_text.rs
 //
 // M4-real: count Devanagari word frequencies from raw running text
-// (e.g. the Nepali Wikipedia dump) and serialise
+// (e.g. a Wikipedia dump for the target language) and serialise
 // HashMap<String, u32> -> data/word_freq_text.bin.
 //
 // Usage: build_wordfreq_text <text-file> [more files...]

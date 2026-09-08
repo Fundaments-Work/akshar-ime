@@ -1,8 +1,9 @@
 // File: src/bin/prune_model.rs
 //
 // Phonetic-model pruning: after training emissions on all Devanagari data
-// (Hindi included), drop the emission rows of aksharas that never appear in
-// the Nepali vocabulary — they cannot be correct outputs for a Nepali IME,
+// (including pairs from other languages sharing the script), drop the emission
+// rows of aksharas that never appear in the target vocabulary — they cannot be
+// correct outputs for this IME,
 // and their peaked emissions crowd real candidates out of the reverse index.
 //
 // Usage: prune_model --model data/translit_model.bin \
@@ -36,7 +37,7 @@ fn main() {
     }
 
     let mut model = TranslitModel::load(Path::new(&model_path)).expect("load model");
-    // Aksharas that occur in the Nepali vocabulary (the IME's target words).
+    // Aksharas that occur in the target vocabulary (the IME's output words).
     let map: std::collections::HashMap<String, u32> =
         bincode::deserialize(&std::fs::read(&vocab_path).expect("vocab")).expect("deserialize");
     let mut seen: HashSet<u32> = HashSet::new();

@@ -1,6 +1,6 @@
 # Akshar Devanagari IME
 
-Roman-script input method for Devanagari, targeted at Nepali. You type
+Roman-script input method for Devanagari. You type
 `namaste`, it offers `नमस्ते`.
 
 ![CI](https://github.com/sapienskid/akshar-ime/actions/workflows/ci.yml/badge.svg)
@@ -29,7 +29,7 @@ component. See the manual for per-stratum numbers with McNemar p-values.
 
 ## Measured performance
 
-Held-out AI4Bharat Aksharantar Nepali test split (4,101 cases), measured
+Held-out AI4Bharat Aksharantar test split (4,101 cases), measured
 2026-09-06 on `data/akshar.model` at default settings.
 
 | Split | n | top-1 | top-5 |
@@ -104,7 +104,7 @@ model and language model always use all 3.59M pairs.
 
 ## Honest limitations
 
-- One language (Nepali), one test set (Aksharantar).
+- One language's data, one test set (Aksharantar).
 - Named entities are well behind the neural baseline.
 - Reranking is worth +6.45pp overall, but **87% of that is a 3-parameter
   frequency heuristic** — the 10⁶-parameter learned stage adds +0.91pp, and its

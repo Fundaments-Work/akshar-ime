@@ -53,7 +53,7 @@ Chapter 9 include the components that turned out to contribute nothing.
 * $R$ denotes a Roman-script input string, $D$ a Devanagari output string,
   $a$ an *akshara* (orthographic syllable), $s$ a Roman *chunk*.
 * Accuracy figures are **top-1 exact string match** unless stated otherwise.
-* `AK-Freq`, `AK-NEF`, `AK-NEI` are the three sources of the Aksharantar Nepali
+* `AK-Freq`, `AK-NEF`, `AK-NEI` are the three sources of the Aksharantar
   test split: frequent native words, and two named-entity sets.
 * Code references are given as `path/to/file.rs`.
 
@@ -74,7 +74,7 @@ Component ablations are switched at runtime; see §9.3.
 # What this system is
 
 Akshar is an input method engine that converts Roman-script typing into
-Devanagari, targeted at Nepali. You type `namaste` and it offers `नमस्ते`.
+Devanagari. You type `namaste` and it offers `नमस्ते`.
 
 Three properties define the design:
 
@@ -93,13 +93,14 @@ browser profile is 8.91 MB raw and 4.94 MB Brotli-compressed.
 ## What it is not
 
 It is not a general Indic transliteration system --- it is trained and measured
-on Nepali only. It does not beat neural baselines on named entities (§9.2). And
+on one language's data only. It does not beat neural baselines on named
+entities (§9.2). And
 it does not yet reach the 90% native accuracy that its error analysis shows is
 attainable (§12).
 
 ## Measured performance
 
-On the held-out AI4Bharat Aksharantar Nepali test split (4,101 cases), measured
+On the held-out AI4Bharat Aksharantar test split (4,101 cases), measured
 2026-09-06 on `data/akshar.model` at default settings:
 
 | Split | $n$ | top-1 | top-5 |
@@ -180,7 +181,7 @@ translation: the output should be the same word in a different script.
 The difficulty is that Roman input for Devanagari is **not a code**. It is a
 lossy, inconsistent, user-invented approximation:
 
-* Vowel length is routinely dropped. `nepali` and `nepaalee` are both `नेपाली`.
+* Vowel length is routinely dropped. `sathi` and `saathee` are both `साथी`.
 * Retroflex/dental distinctions collapse. `t` may be `त` or `ट`.
 * Aspiration is inconsistent. `kh` may be `ख`, but `k` sometimes is too.
 * The inherent schwa is written or omitted at the user's discretion:
@@ -229,7 +230,8 @@ inherent vowel, and a matra (vowel sign) modifies the preceding consonant rather
 than standing alone. The codepoint sequence `क` + `ि` is one pronounceable unit,
 `कि`, and splitting it produces meaningless states.
 
-Whole words are wrong because the vocabulary is open --- Nepali is agglutinative,
+Whole words are wrong because the vocabulary is open --- the language is
+agglutinative,
 and compounds and case-marked forms are productive.
 
 So the unit is the **akshara**, the orthographic syllable of Brahmic scripts.
@@ -253,7 +255,7 @@ Implemented in `src/core/akshara.rs`. Examples:
 
 A halanta (virama, `्`) glues the following consonant into the current akshara,
 which is what makes conjuncts single units. Zero-width joiners are preserved
-when attached to viramas, so Nepali eyelash-ra (`र्‍`) keeps its visual form.
+when attached to viramas, so eyelash-ra (`र्‍`) keeps its visual form.
 
 The trained model has **16,556 aksharas** and **101,010 Roman chunks** before
 pruning; after pruning to those reachable from the corpus vocabulary, 5,938
@@ -598,7 +600,7 @@ reranker uses them as independent features.
 Implemented in `src/core/reranker.rs`, weights in `reranker_weights.rs`.
 
 The decoder's generative score is not the last word. It knows nothing about how
-common a word is, what shape Nepali words have, or how the language's morphology
+common a word is, what shape words of the language have, or how its morphology
 works. The reranker re-scores the decoder's top candidates using features the
 generative model cannot express.
 
@@ -633,7 +635,8 @@ against it, not against nothing.
 | 27 | Roman input length |
 | 28 | morphology-aware effective log frequency |
 
-Feature 28 deserves a note. Nepali is agglutinative, so an inflected form may be
+Feature 28 deserves a note. The language is agglutinative, so an inflected form
+may be
 absent from the corpus while its stem is frequent. `morph_effective_log_freq`
 strips one of 34 known suffixes (`को`, `हरू`, `लाई`, `एको`, ...) and, if the stem
 has frequency $\ge 5$, returns $\log f(\text{stem}) + 3.5$. This gives unseen but
@@ -930,7 +933,7 @@ order of magnitude of the first.
 | `data/aksharantar/train_devanagari.jsonl` | 3.59M Roman/Devanagari pairs |
 | `data/aksharantar/valid_devanagari.jsonl` | held-out validation split |
 | `data/aksharantar/test_devanagari.jsonl` | 4,101-case test split |
-| `data/store/corpus_clean.txt` | 1.5 GB Nepali running text |
+| `data/store/corpus_clean.txt` | 1.5 GB of running text |
 | `data/eval/test_multiref.jsonl` | 14,410 loose romanizations of the test set |
 
 Held-out text never contributes to vocabulary counts or the EM model.
@@ -944,7 +947,7 @@ every number elsewhere in the manual can be checked or contested.
 
 ## Data
 
-**Benchmark.** The AI4Bharat *Aksharantar* Nepali collection
+**Benchmark.** The AI4Bharat *Aksharantar* collection
 [Madhani et al. 2023], a public corpus of Roman/Devanagari word pairs.
 
 | Split | Pairs | Use |
@@ -958,15 +961,15 @@ reported separately throughout because they behave very differently:
 
 | Stratum | $n$ | Content |
 | :--- | ---: | :--- |
-| `AK-Freq` | 2,108 | frequent native Nepali words |
+| `AK-Freq` | 2,108 | frequent native words |
 | `AK-NEI` | 1,176 | named entities, Indic-origin |
 | `AK-NEF` | 817 | named entities, foreign-origin |
 
 `AK-Freq` is treated as the headline metric because it measures the intended
-task --- typing ordinary Nepali. Named-entity strata are reported alongside and
+task --- typing ordinary prose. Named-entity strata are reported alongside and
 never pooled into a single "accuracy" without saying so.
 
-**Vocabulary and language-model text** come from a separate 1.5 GB Nepali
+**Vocabulary and language-model text** come from a separate 1.5 GB
 running-text corpus (`data/store/corpus_clean.txt`), pruned at frequency $< 3$
 to 470,012 types.
 
@@ -1509,7 +1512,7 @@ but it is not currently earning its place.
 
 ## Scope limitations
 
-* **One language.** Trained and measured on Nepali only.
+* **One language.** Trained and measured on a single language's data.
 * **One test set.** Aksharantar. The Dakshina benchmark, on which IndicXlit
   reports its headline, is not evaluated.
 * **Named entities are well behind** the neural baseline: 31--48% against
@@ -1675,7 +1678,7 @@ Recorded in `docs/plans/archive/2026-09-05-research-agenda.md`:
 | `2026-09-03-transliteration-accuracy-research.md` | Error analysis and a ranked technique shortlist (E0--E7) with expected gains. |
 | `2026-09-03-accuracy-experiments.md` | **The experiment log**: E0--E3 with measured deltas, the WFST core, depth-2 pair context. |
 | `2026-09-05-data-flow.md` | How raw text becomes the artefacts a keystroke touches. |
-| `2026-09-05-data-research.md` | Literature review: IndicXlit's data usage, context in production IMEs [Kirov et al. 2024], larger Nepali corpora. |
+| `2026-09-05-data-research.md` | Literature review: IndicXlit's data usage, context in production IMEs [Kirov et al. 2024], larger corpora. |
 | `2026-09-05-research-agenda.md` | Mathematics considered but not executed. |
 | `2026-09-05-roadmap-to-90.md` | First plan to 90%: audit of how every byte of data is used. |
 | `2026-09-05-path-past-90.md` | Its revision, with W0 measurement-gate results. |
@@ -1957,4 +1960,4 @@ the vocabulary-constrained decode pass.
 variance [Welford 1962].
 
 **ZWJ / ZWNJ** --- zero-width joiner and non-joiner (U+200D, U+200C). Preserved
-next to viramas so Nepali eyelash-ra (`र्‍`) keeps its form.
+next to viramas so eyelash-ra (`र्‍`) keeps its form.

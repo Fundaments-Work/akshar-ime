@@ -2,7 +2,7 @@
 
 ## v1.1.0 — 2026-09-06
 
-A correctness, performance, and cross-platform release. Includes native IBus engine, WebAssembly browser build, trained unified models, and source documentation. Every figure below was measured on the 4,101-case Aksharantar Nepali test split; see `docs/MANUAL.md` for method.
+A correctness, performance, and cross-platform release. Includes native IBus engine, WebAssembly browser build, trained unified models, and source documentation. Every figure below was measured on the 4,101-case Aksharantar test split; see `docs/MANUAL.md` for method.
 
 ### Highlights
 

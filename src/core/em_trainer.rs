@@ -786,7 +786,7 @@ mod tests {
         let mut t = Trainer::new();
         t.add_pair("ka", "क");
         t.add_pair("kama", "कम");
-        t.add_pair("nepal", "नेपाल");
+        t.add_pair("kamal", "कमल");
         t.add_pair("namaste", "नमस्ते");
         let model = t.finalize(&TrainerConfig::default());
         assert!(model.validate());
