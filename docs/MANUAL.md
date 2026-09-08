@@ -170,9 +170,9 @@ make wasm-serve     # serves the demo at http://localhost:8000/web/
 ```
 
 ```js
-import { createEngineFromModel } from './akshar.js';
-const engine = await createEngineFromModel('/data/akshar_wasm.model');
-const suggestions = engine.get_suggestions('namaste', 5);
+import { AksharIME } from './js/akshar-ime.js';
+await AksharIME.init({ modelUrl: '/data/akshar_wasm.model' });
+AksharIME.attach(document.querySelector('input'));
 ```
 
 See Chapter 10 for deployment detail.
@@ -304,8 +304,11 @@ $$
 $$
 
 the probability that akshara $a$ is written as Roman chunk $s$. Chunks are
-lowercase ASCII of length $0 \dots 5$; the empty chunk lets an akshara be
-written as nothing at all, which is how the model handles dropped schwas.
+lowercase ASCII. The training lattice permits lengths $0 \dots 5$
+(`em_trainer.rs:9`); the shipped vocabulary holds lengths $1 \dots 5$
+(`translit_model.rs:45`). The empty alignment is how training explains aksharas
+with no Roman counterpart; every chunk consumed at decode time has length
+$\ge 1$.
 
 Chunks are packed into a `u32` for allocation-free lookup: 5 bits per character
 (26 letters plus an escape) in bits 0--24, and a 4-bit length in bits 26--29
@@ -792,9 +795,10 @@ Two mechanisms remain, and they are different in kind:
    variant is ever decoded and the EM emissions already absorb these
    alternations.
 2. **User SymSpell** --- symmetric-delete matching [Garbe] over confirmed words. Every
-   hit is verified with bounded Damerau-Levenshtein before scoring, because a
-   delete-set intersection is a *necessary* condition only: at
-   `max_edit_distance = 1` it still returns pairs at true distance 2.
+   hit is verified with bounded Levenshtein distance before scoring, because a
+   delete-set intersection is a *necessary* condition only: lookup returns pairs
+   at true distances beyond the setting (defect D2 in the archive), and ours is
+   `MAX_EDIT_DISTANCE = 2` (`src/core/engine.rs:34`).
 
 Behaviour is pinned by `tests/fuzzy_behavior.rs`.
 
@@ -1213,6 +1217,13 @@ reproducible from the shipped binary rather than from patched builds.
 | `AKSHAR_NO_VARIANTS=1` | decode the raw query only |
 | `AKSHAR_BEAM=<n>` | beam width (default 64) |
 | `AKSHAR_RERANK_DEPTH=<n>` | cascade depth (default 24) |
+| `AKSHAR_CACHE_SIZE=<n>` | suggestion-cache size (default 256) |
+| `AKSHAR_DATA_DIR=<dir>` | model directory override (default: `data/`, then
+`~/.local/share/akshar-ime`, then `/usr/share/akshar-ime`) |
+| `AKSHAR_USER_TRIE_BASE=<n>` | learned-word base score (default 900,000) |
+| `AKSHAR_FUZZY_BASE=<n>` | fuzzy-match base score (default 50,000; penalty
+12,000 per edit distance) |
+| `AKSHAR_KN_FIXED_DISCOUNT=1` | single-discount LM ablation for the §9.4 comparison |
 
 ## The rerank stage, built up from raw decoder order
 
@@ -1306,11 +1317,12 @@ switched off. It never contributed recall at any setting.
 **Corpus lexicon.** Dead by construction: the shipped path never loaded one, and
 its data file was no longer produced by the pipeline. 0.00pp on every split.
 
-**Lattice CRF and pair model.** 1,518 lines, never constructed, never packed
+**Lattice CRF and pair model.** 1,108 lines across two modules (`crf.rs` 702 +
+`pair_model.rs` 406, per git history), never constructed, never packed
 into the container. The "modified Kneser-Ney" work of an earlier commit had
 landed here --- in modules that never shipped.
 
-Total removed: ~1,862 lines, no measurable accuracy change.
+Total removed: ~1,452 lines, no measurable accuracy change.
 
 ## Modified Kneser-Ney against a single discount
 
@@ -1412,12 +1424,14 @@ make wasm-serve      # demo on :8000
 ```
 
 ```js
-import { createEngineFromModel } from './akshar.js';
-const engine = await createEngineFromModel('/data/akshar_wasm.model');
-engine.get_suggestions('namaste', 5);
-engine.confirm('namaste', 'नमस्ते');
-localStorage.setItem('akshar', engine.export_state());
+import { AksharIME } from './js/akshar-ime.js';
+await AksharIME.init({ modelUrl: '/data/akshar_wasm.model' });
+AksharIME.attach(document.querySelector('input'));
 ```
+The wrapper (`js/akshar-ime.js`) calls `createEngine(modelUrl, lexiconUrl,
+rerankerUrl)` from `wasm/pkg/akshar_ime.js` (raw factory
+`createEngineFromModelUrl` — see `src/wasm.rs`); its engine object exposes
+`getSuggestions`, `confirm`, `export_state`/`import_state`.
 
 Serve `akshar_wasm.model` with `Content-Encoding: br` and a long cache lifetime;
 it is 4.94 MB compressed and immutable.
@@ -1449,33 +1463,34 @@ part of the runtime engine.
 
 # Source map
 
-11,094 lines of Rust. Runtime core first, then tooling.
+11,942 lines of Rust. Runtime core first, then tooling. Counts re-measured
+2026-09-08 (`wc -l`); earlier editions of this table drifted and are not trusted.
 
 | File | Lines | Role |
 | :--- | ---: | :--- |
-| `core/engine.rs` | 989 | orchestration, candidate fusion, learning |
-| `core/em_trainer.rs` | 968 | EM (scaled forward-backward), Kneser-Ney LM construction |
-| `core/codec.rs` | 788 | compact container encoding |
+| `core/engine.rs` | 1003 | orchestration, candidate fusion, learning |
+| `core/em_trainer.rs` | 977 | EM (scaled forward-backward), Kneser-Ney LM construction |
+| `core/codec.rs` | 819 | compact container encoding |
 | `core/decoder.rs` | 635 | lattice beam search, both passes |
-| `core/reranker.rs` | 569 | dense + sparse features, blend, cascade |
+| `core/reranker.rs` | 625 | dense + sparse features, blend, cascade |
 | `core/unified.rs` | 494 | container layout and version dispatch |
 | `core/translit_model.rs` | 367 | model access: emissions, LM lookups, backoff |
-| `core/normalizer.rs` | 309 | query-variant rewriting |
+| `core/normalizer.rs` | 311 | query-variant rewriting |
 | `core/alignment.rs` | 250 | deterministic aligner used to seed EM |
-| `core/akshara.rs` | 199 | akshara segmentation |
-| `core/trie.rs` | 148 | user-learned dictionary |
+| `core/akshara.rs` | 206 | akshara segmentation |
+| `core/trie.rs` | 164 | user-learned dictionary |
 | `core/wordtrie.rs` | 92 | corpus vocabulary trie for the constrained pass |
 | `core/context.rs` | 52 | user bigram re-ranking |
 | `core/holdout.rs` | 66 | held-out split helper |
 | `fuzzy/symspell.rs` | 113 | symmetric-delete index |
-| `fuzzy/grammar.rs` | 481 | orthographic canonicalisation (offline tools only) |
+| `fuzzy/grammar.rs` | 525 | orthographic canonicalisation (offline tools only) |
 | `learning.rs` | 123 | learning orchestration |
-| `persistence.rs` | 75 | learned-state serialisation |
+| `persistence.rs` | 77 | learned-state serialisation |
 | `c_api.rs` | 118 | C ABI for IBus |
 | `wasm.rs` | 411 | WebAssembly bindings |
-| `bin/train/train.rs` | 861 | training pipeline |
-| `bin/evaluate/*` | 1,598 | evaluation and error analysis |
-| `bin/build/*` | 1,275 | container assembly, pruning, diagnostics |
+| `bin/train/train.rs` | 897 | training pipeline |
+| `bin/evaluate/*` | 2004 | evaluation and error analysis |
+| `bin/build/*` | 1376 | container assembly, pruning, diagnostics |
 
 Tests: `tests/accuracy_regression.rs`, `tests/fuzzy_behavior.rs`, plus module
 tests. Diagnostics: `examples/profile_decode.rs`,
@@ -1518,7 +1533,7 @@ objective and no regularisation, overfitting is the likely explanation.
 **Modified Kneser-Ney is not measurably better than a single discount**
 (§9.4).
 
-**Query-variant rewriting contributes 0.00pp** (§9.1). 309 lines of Dijkstra
+**Query-variant rewriting contributes 0.00pp** (§9.1). 311 lines of Dijkstra
 over a rewrite transducer whose only decoded output is the identity variant.
 Retained because it is the only cold-start mechanism for spelling alternation,
 but it is not currently earning its place.
@@ -1881,8 +1896,9 @@ and gold, divided by total gold length. A graded alternative to exact match.
 
 **Chandrabindu** (`ँ`) --- a nasalisation diacritic distinct from anusvara.
 
-**Chunk** --- a contiguous run of 0--5 Roman characters emitted by one akshara.
-The empty chunk is how the model represents a dropped inherent vowel.
+**Chunk** --- a contiguous run of 1--5 Roman characters emitted by one akshara
+in the shipped model (training alignments additionally permit the empty
+string).
 
 **Codebook quantisation** --- storing weights as 8-bit indices into a
 256-entry table of `f32` values, rather than as full floats.

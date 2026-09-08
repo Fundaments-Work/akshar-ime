@@ -1,6 +1,6 @@
 {
   "name": "akshar-ime",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Akshar Devanagari IME — WASM + JS for browsers. Type Roman, get Devanagari. Offline, fast, adaptive.",
   "type": "module",
   "main": "./pkg/akshar_ime.js",

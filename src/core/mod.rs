@@ -31,6 +31,11 @@ pub mod wordtrie;
 /// | `AKSHAR_GAMMA` | override the dense/heuristic blend (0.0 = heuristic only) |
 /// | `AKSHAR_NO_TRIGRAM` | force the LM to back off to bigrams |
 /// | `AKSHAR_NO_VARIANTS` | decode the raw query only, no normalizer variants |
+/// | `AKSHAR_CACHE_SIZE` | suggestion-cache size (default 256) |
+/// | `AKSHAR_DATA_DIR` | model directory override |
+/// | `AKSHAR_USER_TRIE_BASE` | learned-word base score (default 900000) |
+/// | `AKSHAR_FUZZY_BASE` | fuzzy-match base score (default 50000) |
+/// | `AKSHAR_KN_FIXED_DISCOUNT` | single-discount LM ablation |
 pub mod ablation {
     use std::sync::OnceLock;
 
