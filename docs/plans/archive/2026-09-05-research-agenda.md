@@ -1,5 +1,8 @@
 # AksharIME — Research Agenda (the mathematics ahead)
 
+> **Archive snapshot — frozen.** Open ideas, unaffected by later changes; all
+> items below are still open. See `docs/MANUAL.md` for what has since landed.
+
 Date: 2026-09-05. Companion to `2026-09-05-mathematics.md`.
 Priorities ordered by user impact; §2 is the paper's core.
 

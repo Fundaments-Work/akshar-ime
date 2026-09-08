@@ -24,6 +24,10 @@
 //     --full-case          use ImeEngine::from_file_or_new with a user dict
 
 use akshar_ime::ImeEngine;
+use clap::Parser;
+use rand::Rng as _;
+use rand::SeedableRng;
+use rand_chacha::ChaCha8Rng;
 use serde::Deserialize;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -55,24 +59,55 @@ struct Record<'a> {
     native: &'a str,
 }
 
+#[derive(Debug, Parser)]
 struct Args {
+    /// Test set (Aksharantar JSONL or roman<TAB>target1|target2 TSV).
+    #[arg(long, default_value = "data/aksharantar/test_devanagari.jsonl")]
     dataset: PathBuf,
+    /// Top-k for the hit metric.
+    #[arg(long, default_value_t = 10)]
     topk: usize,
+    /// Suggestions to request per query (default: topk).
+    #[arg(long, default_value_t = 0)]
     suggestions: usize,
+    /// Bootstrap resamples (0 disables CIs).
+    #[arg(long, default_value_t = 1000)]
     resamples: usize,
+    /// RNG seed for bootstrap resampling.
+    #[arg(long, default_value_t = 42)]
     seed: u64,
+    /// Only evaluate first <n> cases (debug).
+    #[arg(long)]
     limit: Option<usize>,
+    /// Print up to <n> missed cases.
+    #[arg(long, default_value_t = 0)]
     show_misses: usize,
+    /// Load a user dictionary (data/user_dictionary.bin).
+    #[arg(long, default_value_t = false)]
     full_case: bool,
-    /// Explicit unified-model path.  Without it the engine resolves
-    /// data/akshar.model by its usual search order, which is fine
-    /// interactively but useless to the ablation harness, which needs to
-    /// score many candidate models in one run.
+    /// Explicit unified-model path. Without it the engine resolves
+    /// data/akshar.model by its usual search order.
+    #[arg(long)]
     model: Option<PathBuf>,
 }
 
+fn default_dataset() -> PathBuf {
+    for cand in [
+        "data/aksharantar/test_devanagari.jsonl",
+        "data/aksharantar/nep_test.json",
+    ] {
+        if std::path::Path::new(cand).exists() {
+            return PathBuf::from(cand);
+        }
+    }
+    PathBuf::from("data/aksharantar/test_devanagari.jsonl")
+}
+
 fn main() {
-    let args = parse_args();
+    let mut args = Args::parse();
+    if !args.dataset.exists() {
+        args.dataset = default_dataset();
+    }
 
     let cases = match parse_dataset(&args.dataset) {
         Ok(c) if !c.is_empty() => c,
@@ -231,13 +266,14 @@ fn mean(xs: &[f64]) -> f64 {
 type Ci = (f64, f64);
 
 /// Bootstrap resampling for 95% confidence intervals on all four metrics.
-/// Returns (top1, top5, top10, mrr) CIs as (low, high) tuples.
+/// Uses `rand_chacha::ChaCha8Rng` (seedable, reproducible) instead of the
+/// previous hand-rolled SplitMix64.
 fn bootstrap(outcomes: &[CaseOutcome], resamples: usize, seed: u64) -> (Ci, Ci, Ci, Ci) {
     let n = outcomes.len();
     if n == 0 || resamples == 0 {
         return ((0.0, 0.0), (0.0, 0.0), (0.0, 0.0), (0.0, 0.0));
     }
-    let mut rng = Rng::new(seed);
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let mut t1 = Vec::with_capacity(resamples);
     let mut t5 = Vec::with_capacity(resamples);
     let mut t10 = Vec::with_capacity(resamples);
@@ -249,7 +285,7 @@ fn bootstrap(outcomes: &[CaseOutcome], resamples: usize, seed: u64) -> (Ci, Ci, 
         let mut s10 = 0u32;
         let mut sr = 0.0f64;
         for _ in 0..n {
-            let idx = (rng.next() as usize) % n;
+            let idx = rng.gen_range(0..n);
             let o = &outcomes[idx];
             s1 += o.top1 as u32;
             s5 += o.top5 as u32;
@@ -284,26 +320,6 @@ fn percentile(sample: &[f64], p: f64) -> f64 {
     }
     let frac = rank - lo as f64;
     v[lo] * (1.0 - frac) + v[hi] * frac
-}
-
-/// Splitmix64-based PRNG: deterministic, seedable, fast. Good enough for
-/// bootstrap resampling and fully reproducible for paper reporting.
-struct Rng {
-    state: u64,
-}
-impl Rng {
-    fn new(seed: u64) -> Self {
-        Self {
-            state: seed.wrapping_add(0x9E3779B97F4A7C15),
-        }
-    }
-    fn next(&mut self) -> u64 {
-        let mut z = self.state.wrapping_add(0x9E3779B97F4A7C15);
-        self.state = z;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
-        z ^ (z >> 31)
-    }
 }
 
 fn parse_dataset(path: &PathBuf) -> Result<Vec<EvalCase>, String> {
@@ -375,94 +391,6 @@ fn parse_tsv(path: &PathBuf) -> Result<Vec<EvalCase>, String> {
     Ok(cases)
 }
 
-fn parse_args() -> Args {
-    let mut dataset = if std::path::Path::new("data/aksharantar/nep_test.json").exists() {
-        PathBuf::from("data/aksharantar/nep_test.json")
-    } else if std::path::Path::new("data/aksharantar/test_devanagari.jsonl").exists() {
-        PathBuf::from("data/aksharantar/test_devanagari.jsonl")
-    } else {
-        PathBuf::from("data/aksharantar/nep_test.json")
-    };
-    let mut topk: usize = 10;
-    let mut suggestions: usize = 0;
-    let mut resamples: usize = 1000;
-    let mut seed: u64 = 42;
-    let mut limit: Option<usize> = None;
-    let mut show_misses: usize = 0;
-    let mut full_case = false;
-    let mut model: Option<PathBuf> = None;
-
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--dataset" => dataset = PathBuf::from(next_value(&arg, args.next())),
-            "--topk" => topk = next_value(&arg, args.next()).parse().expect("--topk <n>"),
-            "--suggestions" => {
-                suggestions = next_value(&arg, args.next())
-                    .parse()
-                    .expect("--suggestions <n>")
-            }
-            "--resamples" => {
-                resamples = next_value(&arg, args.next())
-                    .parse()
-                    .expect("--resamples <n>")
-            }
-            "--seed" => seed = next_value(&arg, args.next()).parse().expect("--seed <n>"),
-            "--limit" => limit = Some(next_value(&arg, args.next()).parse().expect("--limit <n>")),
-            "--show-misses" => {
-                show_misses = next_value(&arg, args.next())
-                    .parse()
-                    .expect("--show-misses <n>")
-            }
-            "--full-case" => full_case = true,
-            "--model" => model = Some(PathBuf::from(args.next().expect("value for --model"))),
-            "--help" | "-h" => {
-                print_help();
-                std::process::exit(0);
-            }
-            other => {
-                eprintln!("Unknown argument: {other}");
-                print_help();
-                std::process::exit(2);
-            }
-        }
-    }
-    let suggestions = if suggestions == 0 { topk } else { suggestions };
-    Args {
-        dataset,
-        topk,
-        suggestions,
-        resamples,
-        seed,
-        limit,
-        show_misses,
-        full_case,
-        model,
-    }
-}
-
-fn next_value(flag: &str, val: Option<String>) -> String {
-    val.unwrap_or_else(|| {
-        eprintln!("Missing value for {flag}");
-        std::process::exit(2);
-    })
-}
-
-fn print_help() {
-    println!("Usage: cargo run --release --bin evaluate -- [options]");
-    println!("Options:");
-    println!("  --dataset <path>      test set (default: data/aksharantar/nep_test.json)");
-    println!("  --topk <n>            top-k for hit metric (default: 10)");
-    println!("  --suggestions <n>     suggestions to request per query (default: topk)");
-    println!("  --resamples <n>       bootstrap resamples (default: 1000)");
-    println!("  --seed <n>            RNG seed (default: 42)");
-    println!("  --limit <n>           only evaluate first <n> cases (debug)");
-    println!("  --show-misses <n>     print up to <n> missed cases (default: 0)");
-    println!("  --model <path>        unified model to score (default: engine search order)");
-    println!("  --full-case           load a user dictionary (data/user_dictionary.bin)");
-    println!("  -h, --help            show help");
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -511,10 +439,10 @@ mod tests {
 
     #[test]
     fn rng_is_deterministic() {
-        let mut a = Rng::new(7);
-        let mut b = Rng::new(7);
+        let mut a = ChaCha8Rng::seed_from_u64(7);
+        let mut b = ChaCha8Rng::seed_from_u64(7);
         for _ in 0..10 {
-            assert_eq!(a.next(), b.next());
+            assert_eq!(a.gen::<u64>(), b.gen::<u64>());
         }
     }
 

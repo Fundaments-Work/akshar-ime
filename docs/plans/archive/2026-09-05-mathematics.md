@@ -1,5 +1,10 @@
 # AksharIME — Complete Mathematical Treatment
 
+> **Archive snapshot — frozen.** Reference as of 2026-09-05. Two caveats: the
+> discounting sections are superseded by `2026-09-06-repair-and-path-to-90.md`,
+> and v1.2.0 NFC-normalizes the segmenter's input (identity on composed text, so
+> the equations stand). Authoritative math is in `docs/MANUAL.md`.
+
 Date: 2026-09-05
 Status: Reference document. Companion: `2026-09-05-research-agenda.md`.
 All equations match the implemented code (file references given).

@@ -1,5 +1,9 @@
 # Accuracy Experiments — Log
 
+> **Archive snapshot — frozen.** Experiment log as run; final figures are in
+> `docs/MANUAL.md` §8–9. The bootstrap protocol is unchanged (B=1000, seed 42);
+> v1.2.0 only swapped the hand-rolled PRNG for `ChaCha8Rng`.
+
 Date started: 2026-09-03
 Benchmark: Aksharantar Nepali test split (4,101 cases; AK-Freq = native words,
 AK-NEF/AK-NEI = named entities). Reference: IndicXlit neural top-1 native=80.25%,

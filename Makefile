@@ -19,13 +19,15 @@ IBUS_COMPONENT_DIR:= $(PREFIX)/share/ibus/component
 DATA_DIR          := $(PREFIX)/share/akshar-ime
 
 # Relative-entropy pruning threshold for the browser model.  Higher = smaller
-# and less accurate; see docs/WASM.md for the measured curve.  3e-2 keeps 47%
-# of trigram transitions and yields 8.91 MB / 4.94 MB Brotli.  Its accuracy has
+# and less accurate; see docs/MANUAL.md "Browser profile" for the measured
+# sizes.  3e-2 keeps 47%
+# of trigram transitions and yields 8.91 MB / 4.94 MB Brotli (verified
+# 2026-09-08).  Its accuracy has
 # not been re-measured since the 2026-09-06 engine changes.
 TRIGRAM_THRESHOLD ?= 3e-2
 .PHONY: all release debug test install uninstall reinstall clean reset-learning \
         restart-ibus help wasm wasm-clean wasm-serve release-upload pack web-model \
-        train train-quick train-mid train-full eval eval-full eval-errors \
+        train train-quick train-mid train-full eval eval-full eval-ime eval-errors \
         ablate manual docs check check-native check-wasm release-check
 # --- Main Targets ---
 
@@ -142,6 +144,12 @@ eval-full:  ## Accuracy with bootstrap 95% CIs and per-query latency.
 eval-errors:  ## Oracle curves, error taxonomy, CER and the collision bound.
 	@cargo run --release --bin analyze_errors -- \
 		--dataset data/aksharantar/test_devanagari.jsonl --beam 256
+
+eval-ime:  ## Plain-language IME report + machine JSON for docs (docs/generated/eval.json).
+	@mkdir -p docs/generated
+	@cargo run --release --bin eval_ime -- \
+		--dataset data/aksharantar/test_devanagari.jsonl \
+		--out docs/generated/eval.json
 
 ablate:  ## Component ablation: what each part of the pipeline contributes.
 	@cargo build --release --bin evaluate_aksharantar 2>/dev/null

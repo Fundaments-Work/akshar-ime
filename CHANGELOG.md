@@ -1,5 +1,41 @@
 # Changelog
 
+## v1.2.0 — 2026-09-08
+
+Engineering-health release: hand-rolled plumbing replaced with maintained
+crates, plus an intuitive evaluation harness. **No accuracy change** — every
+figure from v1.1.0 reproduced identically (`make eval`: 81.83/47.79/31.21;
+`make eval-full`: 61.98%, MRR 0.6906; `make ablate`: all six rows identical).
+
+### Replaced with libraries
+
+- `evaluate` argument parsing → `clap 4` derive (same flags/defaults).
+- Bootstrap PRNG (hand-rolled SplitMix64) → `rand_chacha::ChaCha8Rng`
+  (seed 42, same protocol; no modulo bias).
+- Devanagari classification input → NFC-normalized via
+  `unicode-normalization` before the engine's own akshara segmenter.
+- Test roman-key index/dedup → `fst::Set`; grapheme CER →
+  `unicode-segmentation`; hot buffers → `smallvec`.
+- `Trie::find_word_id_by_devanagari` O(n) linear scan → in-memory index
+  (on-disk format unchanged, rebuilt on load).
+- `criterion` benches added (`benches/decode.rs`); wasm lib check still clean.
+
+### Added
+
+- `make eval-ime`: plain-language report (correct-first-time, visible-in-top-5,
+  keystrokes-saved) plus machine JSON at `docs/generated/eval.json`, the single
+  source every number in the docs regenerates from.
+- Two findings disclosed in the manual: 16 duplicate roman keys in the test set,
+  and prefix completion saving only ~2.7% keystrokes.
+
+### Docs
+
+- `data/README.md`: fixed stale container size (30.59 → 11.37 MB) and result
+  (82.02/92.17 → 81.83/92.22%); Brotli 4.92 → 4.94 MB.
+- `README.md` / `docs/MANUAL.md`: re-verification provenance (2026-09-08),
+  honest IndicXlit reranked figures (86.6% native with LM rerank), Nepali-scope
+  and IBus-tag disclosures.
+
 ## v1.1.0 — 2026-09-06
 
 A correctness, performance, and cross-platform release. Includes native IBus engine, WebAssembly browser build, trained unified models, and source documentation. Every figure below was measured on the 4,101-case Aksharantar test split; see `docs/MANUAL.md` for method.

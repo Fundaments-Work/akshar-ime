@@ -76,17 +76,24 @@ fn classify(ch: char) -> AksharaClass {
     AksharaClass::Other
 }
 
+use unicode_normalization::UnicodeNormalization;
+
 /// Segment a Devanagari string into akshara (syllabic) units.
+///
+/// The input is NFC-normalized first (via `unicode-normalization`) so that
+/// decomposed matra / nukta sequences are classified identically to their
+/// composed forms. Classification below is still the engine's own IP.
 ///
 /// Each returned `String` is one akshara: a consonant cluster (possibly with
 /// internal halanta conjuncts) plus its vowel sign and trailing combining marks,
 /// or a standalone independent vowel, or a lone non-Devanagari character.
 pub fn segment(dev: &str) -> Vec<String> {
+    let norm: String = dev.nfc().collect();
     let mut units: Vec<String> = Vec::new();
     let mut current = String::new();
     let mut prev_was_halanta = false;
 
-    for ch in dev.chars() {
+    for ch in norm.chars() {
         match classify(ch) {
             AksharaClass::IndependentVowel => {
                 // An independent vowel is always the nucleus of a fresh akshara.

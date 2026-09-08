@@ -1,19 +1,52 @@
-# Data root — where AksharIME's data lives, where it came from, and how it is cleaned
+# Data root — where AksharIME's data lives, where it came from, and how it is used
 
 This directory is **fully gitignored** (only this README is tracked). No data
 is committed to the repository — the repo ships code; releases ship the built
-artifacts. Everything below is rebuilt locally with the pipeline in
-`data/pipeline/`.
+artifacts.
+
+> **Frozen inputs.** The `data/pipeline/` scripts and `data/backup/` snapshots
+> were removed on 2026-09-08. The files below can no longer be regenerated
+> locally — they are inputs, not outputs. To rebuild them from scratch you
+> re-fetch the public sources in the provenance table and re-apply the cleaning
+> rule set below (the rules *are* the pipeline now).
 
 ## Where the data came from (provenance)
 
 | Source | What it is | License / access |
 |---|---|---|
-| **Aksharantar** (AI4Bharat, IIT Madras) | 5.4M roman→Devanagari word pairs, produced by human annotators and validated with a rule-based checker. The per-language files are **merged into one language-agnostic Devanagari set**; nothing downstream reads the language a pair came from. | CC0 / some CC-BY — download from [HuggingFace](https://huggingface.co/datasets/ai4bharat/Aksharantar) |
+| **Aksharantar** (AI4Bharat, IIT Madras) | ~5.4M raw roman→Devanagari word pairs, cleaned and merged into one language-agnostic Devanagari set (3,588,793 train pairs); nothing downstream reads the language a pair came from. | CC0 / some CC-BY — [HuggingFace](https://huggingface.co/datasets/ai4bharat/Aksharantar) |
 | **Wikipedia** | Full article dump for the target language, text extracted from the XML. | CC-BY-SA — [dumps.wikimedia.org/newiki](https://dumps.wikimedia.org/newiki/) |
 | **CC100** | CommonCrawl web text, the portion the creators filtered to Devanagari. | CC0 — [data.statmt.org/cc-100](https://data.statmt.org/cc-100/) |
-| **akshar-ime news crawl** | 18,190+ full articles from news sites (gorkhapatra, onlinekhabar, nayapatrika, kanunpatrika), crawled with the private pipeline in `pipeline/pipeline.py`. Current-affairs vocabulary (ministers, dates, places) that encyclopedic sources lack. | public news; only derived counts ship |
+| **akshar-ime news crawl** | 18,190+ full articles from news sites (gorkhapatra, onlinekhabar, nayapatrika, kanunpatrika). Current-affairs vocabulary (ministers, dates, places) that encyclopedic sources lack. Crawl scripts removed; only derived counts survive, frozen inside the corpus. | public news; only derived counts ship |
 | **Your own typing** | learned on-device in `~/.config/akshar-devanagari/`, never leaves the machine | — |
+
+## How the corpus is used (the full chain)
+
+`data/store/corpus_clean.txt` (1.5 GB, 2.89M clean unique sentences, 86.1M
+tokens) is the system's **word-frequency source**. Exactly this, nothing more:
+
+1. **Train time** (`src/bin/train/train.rs`): the corpus is tokenized with the
+   cleaning rule set below; tokens with frequency ≥ 3 become `vocab_freq`
+   (~470k words), packed into the unified container (`src/core/unified.rs`,
+   v5: translit model + sparse reranker table + `vocab_freq` + dense
+   normalisation constants).
+2. **Runtime** (`src/core/engine.rs`): `vocab_freq` feeds three consumers —
+   the `WordTrie` (trie-constrained decode pass), `FreqRanks` (the frequency
+   heuristic, +5.64pp on `AK-Freq`, the single largest rerank contributor),
+   and the engine's `freq` map for candidate scoring.
+3. **Sentence evaluation** (`src/bin/evaluate/evaluate_sentences.rs`): reads
+   the corpus with a 1-in-200 holdout (`src/core/holdout.rs`) for
+   in-context accuracy.
+
+What the corpus does **not** feed:
+
+- the akshara KN language model and EM emissions — those come from the
+  Aksharantar word pairs, not running text;
+- word-bigram context — the v4 word-bigram table was removed (19.5 MB for
+  +0.16pp, not shipped), and `store/word_pairs.csv` does not exist. The
+  `ContextModel` (`src/core/context.rs`) learns word bigrams on-device from
+  the user's own confirmations only, and `set_context_word` is an
+  unimplemented stub (`src/core/engine.rs`).
 
 ## How the data is cleaned (the single rule set)
 
@@ -34,9 +67,9 @@ Why it matters: glued variants split a real word's count across dictionary
 keys, flattening exactly the frequency signal the engine's reranker depends
 on. Cleaning + dedup of the text corpus measured **+0.33 points** native
 top-1 (79.51-equivalent configs → see
-`../docs/plans/2026-09-03-accuracy-experiments.md`).
+`../docs/plans/archive/2026-09-03-accuracy-experiments.md`).
 
-## Layout
+## Layout (current — 2026-09-08 cleanup)
 
 ```
 data/
@@ -46,49 +79,31 @@ data/
     test_devanagari.jsonl        4,101 cases — benchmark (single-shot measurement)
   store/
     corpus_clean.txt   THE single stored text: 2.89M clean unique sentences,
-                       86.1M tokens, compiled from Wikipedia+CC100+news;
-                       frequencies and bigrams are derived from it
-    word_pairs.csv     word bigrams (freq>=3) — E6 context-layer data
-  eval/                benchmark convenience files (TSV = test split flattened)
-  pipeline/            the pipeline (private, untracked):
-    pipeline.py            news crawl / count / export
-    clean_aksharantar.py   strict-clean + merge the word-pair JSONs
-    build_corpus.py        compile the cleaned corpus, delete raw inputs
-    fetch_corpus.py        download Aksharantar from Hugging Face
-    extract_wiki.py        Wikipedia dump -> text lines
-    filter_cc100.py        CC100 -> Devanagari lines
-    make_eval_tsv.py       regenerate eval TSV
-    .venv/                 its Python environment
-  backup/              gzip snapshots taken before destructive operations, and
-                       akshar_full_precision.model — the f32 master kept because
-                       the shipped containers are 8-bit quantized and cannot be
-                       reverted without retraining
-  akshar.model         BUILT — desktop container, 30.59 MB (transliteration model +
-                       KN syllable LM + 470k vocab frequencies + sparse reranker
-                       weights + phrase bigrams)
-  akshar_wasm.model    BUILT — browser container, 8.91 MB / 4.92 MB Brotli
-                       (entropy-pruned trigram LM, no phrase bigrams)
+                       86.1M tokens; word frequencies are derived from it at
+                       train time (see "How the corpus is used" above)
+  eval/
+    test_multiref.jsonl  14,410 alternative romanizations for multi-reference
+                         scoring (see MANUAL §8; not wired into any harness —
+                         measured ad hoc, reported alongside strict accuracy,
+                         never instead of it)
+  akshar.model         BUILT — desktop container, 11.37 MB (11,917,219 bytes:
+                        transliteration model +
+                        KN syllable LM + 470k vocab frequencies + sparse reranker
+                        weights + dense normalisation constants; no word bigrams)
+  akshar_wasm.model    BUILT — browser container, 8.91 MB / 4.94 MB Brotli
+                        (entropy-pruned trigram LM, no phrase bigrams)
 ```
 
-## Rebuild recipes (local; not Makefile targets — data is not in the repo)
+Removed 2026-09-08 and intentionally not restored: `backup/` (snapshots),
+`akshar_mid.model` (unreferenced checkpoint — `train` rebuilds it),
+`pipeline/` (all scripts + venv), `eval/valid_nep.jsonl`,
+`eval/valid_native.jsonl`, `eval/aksharantar_test.tsv` (all unreferenced
+scratch; the TSV regenerates from the test split if needed).
+
+## Recipes (local; only what still runs — data is not in the repo)
 
 ```bash
-# 1. Word-pair corpus (transliteration training)
-python3 data/pipeline/fetch_corpus.py data/aksharantar     # download Aksharantar
-python3 data/pipeline/clean_aksharantar.py                 # clean + merge -> *_devanagari.jsonl
-#   originals are deleted after cleaning; keep data/backup/*.gz snapshots
-
-# 2. Cleaned running-text corpus (the single text file)
-mkdir -p data/raw
-curl -sL -o /tmp/newiki.xml.bz2 https://dumps.wikimedia.org/newiki/latest/newiki-latest-pages-articles.xml.bz2
-python3 data/pipeline/extract_wiki.py /tmp/newiki.xml.bz2 data/raw/newiki.txt
-curl -sL -o /tmp/cc100-ne.txt.xz https://data.statmt.org/cc-100/ne.txt.xz
-python3 data/pipeline/filter_cc100.py /tmp/cc100-ne.txt.xz data/raw/cc100ne.txt
-# news: python3 data/pipeline/pipeline.py crawl  (articles land in the DB)
-python3 data/pipeline/build_corpus.py data/store/corpus_clean.txt \
-    --db data/store/corpus_text.db data/raw/newiki.txt data/raw/cc100ne.txt
-
-# 3. One-Shot End-to-End Model Training
+# 1. Train from the frozen inputs (corpus + pairs must already exist above)
 cargo run --release --bin train
 # or simply: make train
 
@@ -101,25 +116,36 @@ cargo run --release --bin probe_model -- --model data/akshar.model --inspect
 # Pack unified model with customizable bigram filtering:
 cargo run --release --bin pack_model -- --bigram-min-freq 5 --out data/akshar.model
 
-# Build the browser profile (8.91 MB / 4.92 MB Brotli). TRIGRAM_THRESHOLD trades
-# size against accuracy along the curve in docs/MODEL_TRAINING_AND_OPTIMIZATION.md:
+# Build the browser profile (8.91 MB / 4.94 MB Brotli, verified 2026-09-08).
+# TRIGRAM_THRESHOLD trades size against accuracy; see docs/MANUAL.md
+# "Browser profile" for the measured sizes:
 make web-model
 
 # Re-encode an existing container into the current format (any version in, v3 out):
 cargo run --release --bin repack_model -- --model data/akshar.model \
   --out data/akshar.model --compact-aksharas
 
-# 4. Evaluate (Aksharantar test split: 4,101 cases)
+# 2. Evaluate (Aksharantar test split: 4,101 cases)
 cargo run --release --bin evaluate_aksharantar -- --model data/akshar.model
 ```
+
+Re-collecting the raw sources (no scripts left — plain downloads):
+Aksharantar from the HuggingFace link above; Wikipedia from
+`dumps.wikimedia.org/newiki`; CC100-Ne from `data.statmt.org/cc-100`.
+Then re-apply the cleaning rule set in this file.
 
 ## Rules that prevent repeat incidents
 
 - Model artifacts are bundled into the unified `data/akshar.model` container.
 - No binary files are ever stored inside `src/`.
-- The news pipeline exports into `data/store/` and merges into the vocab only
-  via explicit `--merge-base` (a news-only vocabulary once silently overwrote
-  the real one and cost 1.2 accuracy points).
-- **Backup before destroying:** gzip snapshot into `data/backup/` first.
-- Verified result of the current chain: **82.02% native top-1, 92.17% top-5** (desktop profile) through the
+- A news-only vocabulary once silently overwrote the real one and cost 1.2
+  accuracy points — vocabulary merges are explicit or they don't happen.
+- **There is no backup directory.** `data/` is gitignored and local; deletions
+  are final. Keep snapshots outside the repo if you need them.
+- Verified result of the current chain: **81.83% native top-1, 92.22% top-5** (`AK-Freq`,
+  desktop profile) through the
   full engine (canonical discriminative reranker + candidate union + pruned syllable lattice).
+  Re-verified 2026-09-08 with `make eval` after the dependency migration; values unchanged.
+```
+
+(End of file - total 136 lines)

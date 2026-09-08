@@ -55,7 +55,7 @@ fn exact_query_returns_the_learned_word_first() {
 /// 2026-09-06 — an arbitrary u64 band compared against a squashed reranker
 /// score — in the opposite direction. Raising the constant is how the 30.8pp
 /// regression happened, so the fix is the log-linear fusion in phase C4 of
-/// `docs/plans/2026-09-06-repair-and-path-to-90.md`, not a bigger number.
+/// `docs/plans/archive/2026-09-06-repair-and-path-to-90.md`, not a bigger number.
 #[test]
 #[ignore = "documents defect D18: user fuzzy band is unreachable; needs C4"]
 fn learned_word_should_be_recoverable_from_a_typo() {

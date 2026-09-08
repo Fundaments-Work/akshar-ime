@@ -1,5 +1,9 @@
 # Generative Transliteration Core — Design
 
+> **Archive snapshot — frozen.** Original design as of 2026-08-01. The shipped
+> system differs (defect fixes 2026-09-06, dependency migration v1.2.0); the
+> current design is in `docs/MANUAL.md`.
+
 Date: 2026-08-01
 Status: Implemented
 

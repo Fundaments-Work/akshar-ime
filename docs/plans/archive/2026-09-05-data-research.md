@@ -1,5 +1,8 @@
 # Data usage research — how the field uses data, and our path to 90%
 
+> **Archive snapshot — frozen.** Literature review as of 2026-09-05. IndicXlit
+> figures are without LM rerank (reranked: 86.6% Nepali native, paper Table 6).
+
 Date: 2026-09-05. Companion to `2026-09-05-mathematics.md`, `2026-09-05-research-agenda.md`,
 `2026-09-03-accuracy-experiments.md`.
 

@@ -30,7 +30,10 @@ component. See the manual for per-stratum numbers with McNemar p-values.
 ## Measured performance
 
 Held-out AI4Bharat Aksharantar test split (4,101 cases), measured
-2026-09-06 on `data/akshar.model` at default settings.
+2026-09-06 on `data/akshar.model` at default settings and re-verified
+2026-09-08 after the dependency migration (`clap`, `rand_chacha`,
+`unicode-normalization`, `fst`, `smallvec`) — all values below reproduced
+identically (`make eval`, `make eval-full`, `make ablate`).
 
 | Split | n | top-1 | top-5 |
 | :--- | ---: | ---: | ---: |
@@ -41,8 +44,11 @@ Held-out AI4Bharat Aksharantar test split (4,101 cases), measured
 
 Pooled top-1 bootstrap 95% CI [60.61%, 63.36%]; MRR 0.6906; CER on `AK-Freq`
 top-1 is 3.90%. For reference, IndicXlit (an ~11M-parameter transformer) reports
-80.25% top-1 on the native split and 52.67% on named entities — native accuracy
-here is comparable, named-entity accuracy is well behind.
+80.25% top-1 on the native split and 52.67% on named entities *without* LM
+reranking; with its word-unigram rerank it reaches 86.6% / ~62% on Nepali
+([Madhani et al. 2023], Table 6). Neither figure is re-measured here, and no
+controlled head-to-head is claimed — native accuracy here is comparable to the
+unreranked baseline, named-entity accuracy is well behind either way.
 
 | | Desktop | Browser |
 | :--- | ---: | ---: |
@@ -66,7 +72,7 @@ Build a PDF with `make manual`.
 Every metric is defined formally, every technique is credited to its authors,
 and every term is in the glossary. Threats to validity are stated explicitly.
 
-`docs/plans/` holds the live defect register and roadmap;
+The live defect register and roadmap are `docs/MANUAL.md` §11–13;
 `docs/plans/archive/` preserves the experiment log, literature review and
 research agenda from development — what was tried and rejected, not just what
 shipped.
@@ -94,6 +100,7 @@ Browser: `make wasm-serve`, then see the manual's deployment chapter.
 make test          # tests, including the accuracy regression guard
 make eval          # accuracy by split
 make eval-full     # bootstrap CIs, MRR, per-query latency
+make eval-ime      # plain-language report + machine JSON (docs/generated/eval.json)
 make eval-errors   # oracle curves, error taxonomy, CER, collision bound
 make ablate        # component contributions
 ```

@@ -1,5 +1,10 @@
 # Repair and path to 90% — measured audit, fix plan, improvement plan
 
+> **Archive snapshot — frozen.** Phases A and B landed 2026-09-06; C–F remain
+> open (live status: `docs/MANUAL.md` §12). Sizes below are decimal MB (11.9 MB
+> = 11.37 MiB; 9.34 MB = 8.91 MiB); Brotli re-verified 2026-09-08 as 6.72 /
+> 4.94 MiB. All accuracy figures re-verified identically after v1.2.0.
+
 Date: 2026-09-06. **Phases A and B landed the same day** — see §9 for what
 changed and what it measured. Phases C-F remain open. Supersedes the baseline arithmetic in
 `2026-09-05-path-past-90.md` (whose 81.40% figure no longer describes the

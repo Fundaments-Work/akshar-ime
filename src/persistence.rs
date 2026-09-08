@@ -23,7 +23,9 @@ impl SerializableState {
         }
     }
     pub fn apply_to_engine(self, engine: &mut ImeEngine) {
-        engine.trie = self.trie;
+        let mut trie = self.trie;
+        trie.rebuild_index();
+        engine.trie = trie;
         engine.context_model = self.context_model;
         engine.symspell = self.symspell;
         engine.transliteration_model = self.transliteration_model;

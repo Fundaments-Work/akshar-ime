@@ -1,5 +1,9 @@
 # Transliteration Accuracy Research — Findings & Feasibility
 
+> **Archive snapshot — frozen.** IndicXlit figures below are quoted *without* LM
+> reranking; reranked Nepali is 86.6% native / ~62% named-entity (paper Table 6)
+> — the honest comparison target. See `docs/MANUAL.md` threats to validity.
+
 Date: 2026-09-03
 Status: Research complete; experiments ongoing (see 2026-09-03-accuracy-experiments.md)
 

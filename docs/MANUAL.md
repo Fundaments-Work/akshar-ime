@@ -81,8 +81,12 @@ Three properties define the design:
 **No neural network at runtime.** The model is an EM-trained source-channel
 model over orthographic syllables, a Kneser-Ney syllable language model, and a
 linear discriminative reranker. Inference is beam search plus dot products.
-There is no tensor library, no GPU, and no runtime dependency beyond the Rust
-standard library and `serde`.
+There is no tensor library and no GPU. Runtime dependencies are the Rust
+standard library plus maintained crates (`serde`, `unicode-normalization`,
+`fst`, `smallvec`); developer tooling additionally uses `clap`, `rand` /
+`rand_chacha` and `unicode-segmentation` (evaluation harness) and `criterion`
+(benchmarks). Hand-rolled equivalents (argument parsing, PRNG, Unicode ranges)
+were removed in v1.2.0; the modelling mathematics is unchanged.
 
 **Small enough to ship in a web page.** The desktop container is 11.37 MB; the
 browser profile is 8.91 MB raw and 4.94 MB Brotli-compressed.
@@ -101,7 +105,9 @@ attainable (§12).
 ## Measured performance
 
 On the held-out AI4Bharat Aksharantar test split (4,101 cases), measured
-2026-09-06 on `data/akshar.model` at default settings:
+2026-09-06 on `data/akshar.model` at default settings and re-verified
+2026-09-08 after the v1.2.0 dependency migration (`make eval`,
+`make eval-full`, `make ablate` — every figure below reproduced identically):
 
 | Split | $n$ | top-1 | top-5 |
 | :--- | ---: | ---: | ---: |
@@ -114,15 +120,18 @@ Bootstrap 95% CI on the pooled top-1 is [60.61%, 63.36%]; MRR is 0.6906.
 Character error rate on `AK-Freq` top-1 is 3.90%.
 
 For reference, **IndicXlit** (AI4Bharat; an ~11M-parameter transformer) reports
-80.25% top-1 on the native split and 52.67% on named entities. Native accuracy
-here is comparable; named-entity accuracy is substantially behind.
+80.25% top-1 on the native split and 52.67% on named entities *without* LM
+reranking, and 86.6% / ~62% on Nepali with its word-unigram rerank
+([Madhani et al. 2023], Table 6). Neither figure is re-measured here. Native
+accuracy here is comparable to the unreranked baseline; named-entity accuracy
+is substantially behind either way.
 
 | Resource | Desktop | Browser |
 | :--- | ---: | ---: |
 | Container size | 11.37 MB | 8.91 MB |
 | Brotli-compressed | 6.72 MB | 4.94 MB |
-| Query latency | 0.63--0.82 ms | not re-measured since 2026-09-06 |
-| Cold start | ~1.5 s | not re-measured |
+| Query latency | 0.63--0.82 ms (0.75 ms re-measured 2026-09-08, $k=10$, full set) | not re-measured since 2026-09-06 |
+| Cold start | ~1.5 s (re-verified 2026-09-08: 1.50 s wall for a 5-case process) | not re-measured |
 
 \newpage
 
@@ -1060,7 +1069,8 @@ running --- those are marked where they appear.
 
 **Confidence intervals.** `evaluate` reports bootstrap percentile intervals
 [Efron 1979]: resample the $N$ per-case outcomes with replacement $B$ times
-($B = 1000$ by default, seed 42), recompute the statistic on each resample, and
+($B = 1000$ by default, seed 42, via `rand_chacha::ChaCha8Rng`; v1.2.0 replaced
+a hand-rolled SplitMix64 with this crate without changing the protocol), recompute the statistic on each resample, and
 take the 2.5th and 97.5th percentiles.
 
 **Comparing two configurations.** Independent confidence intervals are the
@@ -1126,6 +1136,7 @@ validation split exists and should be used for them.
 | :--- | :--- |
 | `make eval` | top-1/top-5 per stratum |
 | `make eval-full` | bootstrap CIs, MRR, latency |
+| `make eval-ime` | plain-language report (correct-first-time, visible-in-top-5, keystrokes-saved) plus machine JSON at `docs/generated/eval.json` for regenerating every number in this manual |
 | `make eval-errors` | oracle curves, error taxonomy, CER, collision bound |
 | `make ablate` | per-component contribution |
 | `cargo test --release` | unit tests plus the accuracy regression guard |
@@ -1334,9 +1345,11 @@ length 10 characters):
 | engine overhead | 0.082 | 10% |
 | **end to end** | **0.816** | |
 
-`make eval-full` reports **0.63--0.72 ms/query** at $k = 10$ over the full test
-set, run to run.
-Cold start is ~1.5 s.
+`make eval-full` reports **0.63--0.82 ms/query** at $k = 10$ over the full test
+set, run to run (0.75 ms on the 2026-09-08 re-verification run; the phase
+breakdown above sums to 0.816 ms on the profiling run --- same budget, different
+runs).
+Cold start is ~1.5 s (1.50 s wall for a 5-case process on 2026-09-08).
 
 ## How it got there
 
@@ -1366,7 +1379,7 @@ The lesson worth carrying: the reranker was assumed to be the bottleneck and was
 
 | Configuration | native top-1 | latency |
 | :--- | ---: | ---: |
-| default (beam 64, both passes) | 81.83% | 0.67 ms |
+| default (beam 64, both passes) | 81.83% | 0.67--0.82 ms |
 | trie-constrained pass only | 66.18% | 0.18 ms |
 
 Trie-only decoding is 4x faster but costs 15.65pp: the corpus vocabulary does
@@ -1513,11 +1526,22 @@ but it is not currently earning its place.
 ## Scope limitations
 
 * **One language.** Trained and measured on a single language's data.
+  Concretely Nepali: the 34-suffix strip list (§7.2), `fuzzy/grammar.rs`
+  orthography scores, and the news-domain vocabulary are Nepali-specific and
+  hand- or corpus-derived, not learned multilingually. The engine is script-
+  general but the shipped priors are not.
+* **Installed as a Nepali keyboard.** `devanagari-smart.xml` declares
+  `<language>ne</language>`; that tag controls IBus activation, not model
+  behaviour, but it means multi-language support is untested at the OS layer.
 * **One test set.** Aksharantar. The Dakshina benchmark, on which IndicXlit
   reports its headline, is not evaluated.
+* **Test-set hygiene.** 16 of the 4,101 test cases share a roman key with
+  another case (found by the `fst` index in `eval_ime`); duplicates are counted
+  independently, slightly overweighting those inputs.
 * **Named entities are well behind** the neural baseline: 31--48% against
-  52.67%.
-* **The browser profile has not been re-measured** since 2026-09-06.
+  52.67% (unreranked; ~62% reranked).
+* **The browser profile has not been re-measured** since 2026-09-06; only the
+  desktop figures were re-verified on 2026-09-08.
 * **Numbers predate a full retrain.** Every figure was produced with a reranker
   trained on 100k pairs; the first run to use all 3.59M has not yet been made.
 
@@ -1682,6 +1706,8 @@ Recorded in `docs/plans/archive/2026-09-05-research-agenda.md`:
 | `2026-09-05-research-agenda.md` | Mathematics considered but not executed. |
 | `2026-09-05-roadmap-to-90.md` | First plan to 90%: audit of how every byte of data is used. |
 | `2026-09-05-path-past-90.md` | Its revision, with W0 measurement-gate results. |
+| `2026-09-05-mathematics.md` | Complete mathematical treatment (equations with code references). |
+| `2026-09-06-repair-and-path-to-90.md` | Measured defect audit, landed fixes, improvement plan (A/B shipped, C–F open). |
 
 \newpage
 

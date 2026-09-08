@@ -24,6 +24,11 @@ impl Node {
 pub struct Trie {
     nodes: Vec<Node>,
     pub metadata_store: Vec<WordMetadata>,
+    /// O(1) Devanagari -> WordId index. Skipped in serialization and rebuilt
+    /// on load so the on-disk format is unchanged; fixes the previous O(n)
+    /// linear scan in `find_word_id_by_devanagari`.
+    #[serde(skip, default = "HashMap::new")]
+    id_by_devanagari: HashMap<String, WordId>,
 }
 
 impl Default for Trie {
@@ -37,13 +42,22 @@ impl Trie {
         Self {
             nodes: vec![Node::new()],
             metadata_store: Vec::new(),
+            id_by_devanagari: HashMap::new(),
         }
     }
 
     pub fn find_word_id_by_devanagari(&self, devanagari: &str) -> Option<WordId> {
-        self.metadata_store
-            .iter()
-            .position(|meta| meta.devanagari == devanagari)
+        self.id_by_devanagari.get(devanagari).copied()
+    }
+
+    /// Rebuild the in-memory index after deserialization (format unchanged).
+    pub fn rebuild_index(&mut self) {
+        self.id_by_devanagari.clear();
+        for (id, meta) in self.metadata_store.iter().enumerate() {
+            self.id_by_devanagari
+                .entry(meta.devanagari.clone())
+                .or_insert(id);
+        }
     }
 
     pub fn get_or_create_metadata(&mut self, devanagari: &str) -> WordId {
@@ -56,7 +70,9 @@ impl Trie {
                 variants: HashSet::new(),
             };
             self.metadata_store.push(new_meta);
-            self.metadata_store.len() - 1
+            let id = self.metadata_store.len() - 1;
+            self.id_by_devanagari.insert(devanagari.to_string(), id);
+            id
         }
     }
 
