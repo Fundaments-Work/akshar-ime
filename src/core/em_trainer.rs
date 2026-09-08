@@ -76,6 +76,14 @@ pub struct Trainer {
     continuation: Vec<u64>,
     /// successor_count[(a,b)] = number of distinct c with (a,b,c) seen.
     trigram_successors: HashMap<(u32, u32), u64>,
+    /// bigram_cont_right[(b, c)] = number of distinct a such that trigram (a,b,c) is seen.
+    /// Used for the correct Kneser-Ney trigram lower-order estimate: the textbook
+    /// requires backing off to P_cont(c | b) = N1+(•,b,c) / Σ_c' N1+(•,b,c'), NOT
+    /// the highest-order bigram P(c | b).  An earlier version used bigram_weight(b, c)
+    /// here, which is the deviation documented in §6.6 of MANUAL.md.
+    bigram_cont_right: HashMap<(u32, u32), u64>,
+    /// total_bigram_cont[b] = Σ_c N1+(•,b,c) — denominator for P_cont(c|b).
+    total_bigram_cont: Vec<u64>,
 
     // Global chunk unigram (for Dirichlet-smoothed emissions).
     chunk_unigram: HashMap<u32, f64>,
@@ -106,6 +114,8 @@ impl Trainer {
             trigram_counts: HashMap::new(),
             continuation: Vec::new(),
             trigram_successors: HashMap::new(),
+            bigram_cont_right: HashMap::new(),
+            total_bigram_cont: Vec::new(),
             chunk_unigram: HashMap::new(),
             total_chunk_obs: 0.0,
             distinct_bigrams: 0,
@@ -133,6 +143,7 @@ impl Trainer {
         self.unigram_counts.push(0);
         self.word_initial.push(0);
         self.continuation.push(0);
+        self.total_bigram_cont.push(0);
         id
     }
 
@@ -181,6 +192,17 @@ impl Trainer {
         }
         self.word_initial[aks[0] as usize] += lmw;
         self.total_words += lmw;
+
+        // Append an end-of-word token </w> to the akshara sequence for LM
+        // counting.  The textbook KN formulation requires this so that trigram
+        // mass sums to 1 over all complete words, and so the model can express
+        // that certain aksharas are implausible word endings.  Without it,
+        // 51.9% of native errors are matra-only and concentrate word-finally
+        // (§6.6, §12, MANUAL.md).  The </w> token is never emitted at decode
+        // time: it carries no Roman chunk and is excluded from the reverse
+        // index when building the lattice.
+        let eow_id = self.intern_akshara("</w>");
+        let aks_with_eow: Vec<u32> = aks.iter().copied().chain(std::iter::once(eow_id)).collect();
         // Continuation counts are TYPE counts: they must increment exactly once,
         // on the first time an n-gram is seen.  Keying that off `*e == 0` breaks
         // whenever the added weight is 0 (count_lm disabled, or a sub-1 weight
@@ -188,7 +210,11 @@ impl Trainer {
         // inflates `continuation` / `distinct_bigrams` without bound, corrupting
         // the Kneser-Ney continuation distribution.  Use Entry::Vacant, which
         // means "first insertion" regardless of the weight.
-        for w in aks.windows(2) {
+        //
+        // Use `aks_with_eow` so the </w> token participates in bigram and
+        // trigram counts — this closes the trigram probability mass and lets
+        // the LM penalise implausible word endings.
+        for w in aks_with_eow.windows(2) {
             let (b, c) = (w[0], w[1]);
             match self.bigram_counts.entry((b, c)) {
                 std::collections::hash_map::Entry::Vacant(v) => {
@@ -201,12 +227,26 @@ impl Trainer {
                 }
             }
         }
-        for w in aks.windows(3) {
+        for w in aks_with_eow.windows(3) {
             let (a, b, c) = (w[0], w[1], w[2]);
             match self.trigram_counts.entry((a, b, c)) {
                 std::collections::hash_map::Entry::Vacant(v) => {
                     v.insert(lmw);
                     *self.trigram_successors.entry((a, b)).or_insert(0) += 1;
+                    // Track N1+(•,b,c): count of distinct a for each (b,c).
+                    // This is the correct lower-order estimate for the trigram→bigram
+                    // KN backoff, per Chen & Goodman (1999) §4.
+                    match self.bigram_cont_right.entry((b, c)) {
+                        std::collections::hash_map::Entry::Vacant(vv) => {
+                            vv.insert(1);
+                            // First time (b,c) appears — increment the denominator for b.
+                            self.total_bigram_cont[b as usize] += 1;
+                        }
+                        std::collections::hash_map::Entry::Occupied(mut oo) => {
+                            *oo.get_mut() += 1;
+                            self.total_bigram_cont[b as usize] += 1;
+                        }
+                    }
                 }
                 std::collections::hash_map::Entry::Occupied(mut o) => {
                     *o.get_mut() += lmw;
@@ -471,6 +511,13 @@ impl Trainer {
         model.word_start = word_start;
 
         // Trigram KN LM: group counts by (a,b) context.
+        //
+        // Textbook Kneser-Ney requires that the trigram backs off to the
+        // *continuation probability* P_cont(c | b) = N1+(•,b,c) / Σ_c' N1+(•,b,c'),
+        // NOT the highest-order bigram P(c | b).  The previous code used
+        // `model.bigram_weight(b, c)` here, which is the deviation recorded
+        // in §6.6 of MANUAL.md.  This block uses `self.bigram_cont_right` /
+        // `self.total_bigram_cont` instead.
         let mut by_ctx: HashMap<(u32, u32), Vec<(u32, u64)>> = HashMap::new();
         for (&(a, b, c), &cnt) in &self.trigram_counts {
             by_ctx.entry((a, b)).or_default().push((c, cnt));
@@ -483,6 +530,12 @@ impl Trainer {
         let (d1_tri, d2_tri, d3_tri) =
             Self::modified_discounts(&HashMap::new(), Some(&self.trigram_counts));
         eprintln!("  [lm] trigram discounts: d1={d1_tri:.4} d2={d2_tri:.4} d3={d3_tri:.4}");
+
+        // Total continuation mass per middle akshara b: Σ_c N1+(•,b,c).
+        // This is the denominator for P_cont(c | b) and is already maintained
+        // in `self.total_bigram_cont[b]`.
+        let cont_total = &self.total_bigram_cont;
+
         for &(a, b) in &ctxs {
             let list = &by_ctx[&(a, b)];
             let c_ab = self.bigram_counts.get(&(a, b)).copied().unwrap_or(1) as f64;
@@ -491,13 +544,22 @@ impl Trainer {
                 .map(|(_, c)| Self::discount_for(*c, d1_tri, d2_tri, d3_tri))
                 .sum();
             let lambda = disc_sum / c_ab;
-            trigram_backoff.push((-lambda.ln()) as f32);
+            trigram_backoff.push((-lambda.max(1e-15).ln()) as f32);
+            let denom_b = cont_total.get(b as usize).copied().unwrap_or(0) as f64;
             let mut v = Vec::with_capacity(list.len());
             for &(c, cnt) in list {
                 let d = Self::discount_for(cnt, d1_tri, d2_tri, d3_tri);
                 let disc = (cnt as f64 - d).max(0.0) / c_ab;
-                let p_kn_c = (-model.bigram_weight(b, c)).exp();
-                let p = disc + lambda * p_kn_c;
+                // Correct KN lower-order: continuation probability P_cont(c | b).
+                let n1_bc = self.bigram_cont_right.get(&(b, c)).copied().unwrap_or(0) as f64;
+                let p_cont = if denom_b > 0.0 {
+                    // Floor at 0.5 / denom so no seen (b,c) pair gets zero mass.
+                    (n1_bc + 0.5) / (denom_b + 0.5)
+                } else {
+                    // b never appears as a middle element; fall back to KN unigram.
+                    (-model.unigram_kn.get(c as usize).copied().unwrap_or(12.0) as f64).exp()
+                };
+                let p = disc + lambda * p_cont;
                 let w = if p > 0.0 { -p.ln() } else { 50.0 };
                 v.push((c, w as f32));
             }
@@ -759,7 +821,11 @@ mod tests {
         let mut t = Trainer::new();
         t.add_pair("ka", "क");
         t.add_pair("kha", "ख");
-        assert_eq!(t.akshara_list, vec!["क", "ख"]);
+        // The </w> end-of-word token is interned as a synthetic akshara during LM
+        // counting (see §6.6 fix in MANUAL.md).  Real aksharas still appear.
+        assert!(t.akshara_list.contains(&"क".to_string()));
+        assert!(t.akshara_list.contains(&"ख".to_string()));
+        assert!(t.akshara_list.contains(&"</w>".to_string()));
         assert_eq!(t.ingested, 2);
     }
 
@@ -768,9 +834,15 @@ mod tests {
         let mut t = Trainer::new();
         t.add_pair("ka", "क");
         t.add_pair("kama", "कम");
-        assert_eq!(t.unigram_counts, vec![2, 1]);
-        assert_eq!(t.bigram_counts.get(&(0, 1)), Some(&1));
-        assert_eq!(t.continuation[1], 1);
+        // The </w> synthetic token gets its own akshara slot (unigram_count = 0
+        // since we only append it to bigram/trigram windows, never count it as a
+        // standalone unigram).  Look up counts by ID to be position-independent.
+        let ka_id = t.akshara_map["क"] as usize;
+        let ma_id = t.akshara_map["म"] as usize;
+        assert_eq!(t.unigram_counts[ka_id], 2);
+        assert_eq!(t.unigram_counts[ma_id], 1);
+        assert_eq!(t.bigram_counts.get(&(ka_id as u32, ma_id as u32)), Some(&1));
+        assert_eq!(t.continuation[ma_id], 1);
     }
 
     #[test]

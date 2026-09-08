@@ -72,9 +72,12 @@ const PURNABIRAM: char = '\u{0964}';
 /// User-confirmed word from the learned trie.  Above any decoder score so a
 /// word the user picked before always wins.
 const DEFAULT_USER_TRIE_BASE: u64 = 900_000;
-/// Fuzzy (edit-distance) match over user-learned roman variants.
-const DEFAULT_FUZZY_BASE: u64 = 50_000;
-const FUZZY_DISTANCE_PENALTY_SCALE: u64 = 12_000;
+/// Fuzzy (edit-distance) match over user-learned roman variants (D18 fix).
+/// Calibrated to sit below the decoder's exact top-1 (800,000) so exact decodes
+/// are never hijacked, but well above the decoder tail (~250,000) so a typo
+/// of a learned word is actually recoverable in the top suggestions.
+const DEFAULT_FUZZY_BASE: u64 = 600_000;
+const FUZZY_DISTANCE_PENALTY_SCALE: u64 = 150_000;
 
 fn user_trie_base() -> u64 {
     std::env::var("AKSHAR_USER_TRIE_BASE")
@@ -99,6 +102,8 @@ pub struct ImeEngine {
     /// empty means "use the compiled-in constants".
     pub dense_mean: Vec<f64>,
     pub dense_std: Vec<f64>,
+    /// Jointly-trained dense reranker weights (v6+); empty means "use compiled-in W_DENSE".
+    pub dense_weights: Vec<f64>,
     /// W3: Candidate Union word trie over vocabulary.
     word_trie: Option<crate::core::wordtrie::WordTrie>,
     pub trie: Trie,
@@ -147,6 +152,7 @@ impl ImeEngine {
             reranker_data,
             dense_mean: Vec::new(),
             dense_std: Vec::new(),
+            dense_weights: Vec::new(),
             word_trie,
             trie: Trie::new(),
             context_model: ContextModel::new(CONTEXT_WINDOW_SIZE),
@@ -167,6 +173,9 @@ impl ImeEngine {
         // containers leave these empty and fall back to the compiled-in ones.
         let dense_mean = std::mem::take(&mut unified.dense_mean);
         let dense_std = std::mem::take(&mut unified.dense_std);
+        // Jointly-trained dense weights travel with the model from v6 on; older
+        // containers leave this empty and the reranker falls back to W_DENSE.
+        let dense_weights = std::mem::take(&mut unified.dense_weights);
         let decoder = ModelDecoder::with_config(
             unified.translit,
             DecoderConfig {
@@ -191,6 +200,7 @@ impl ImeEngine {
             reranker_data,
             dense_mean,
             dense_std,
+            dense_weights,
             word_trie,
             trie: Trie::new(),
             context_model: ContextModel::new(CONTEXT_WINDOW_SIZE),
@@ -279,6 +289,7 @@ impl ImeEngine {
             reranker_data,
             dense_mean: Vec::new(),
             dense_std: Vec::new(),
+            dense_weights: Vec::new(),
             word_trie,
             trie: Trie::new(),
             context_model: ContextModel::new(CONTEXT_WINDOW_SIZE),
@@ -528,6 +539,12 @@ impl ImeEngine {
                     self.sparse_table.as_deref(),
                     Some(self.sparse_scale),
                     crate::core::reranker::DenseNorm::from_model(&self.dense_mean, &self.dense_std),
+                    // v6+: use jointly-trained dense weights; None falls back to compiled-in W_DENSE.
+                    if self.dense_weights.is_empty() {
+                        None
+                    } else {
+                        Some(&self.dense_weights)
+                    },
                 ),
                 None => self.reranker.rerank(roman, cands),
             };
@@ -890,6 +907,7 @@ mod tests {
             reranker_data: None,
             dense_mean: Vec::new(),
             dense_std: Vec::new(),
+            dense_weights: Vec::new(),
             word_trie: None,
             trie: Trie::new(),
             context_model: ContextModel::new(3),

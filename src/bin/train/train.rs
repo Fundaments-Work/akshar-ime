@@ -375,7 +375,9 @@ fn main() -> Result<()> {
 
     struct RerankItem {
         target_idx: usize,
-        base_scores: Vec<f64>,
+        /// Standardised dense feature matrix: dense_feats[i] is the DENSE_DIM feature
+        /// vector for candidate i (already z-scored against MEAN_DENSE/STD_DENSE).
+        dense_feats: Vec<[f64; DENSE_DIM]>,
         sparse: Vec<Vec<usize>>,
     }
 
@@ -383,9 +385,15 @@ fn main() -> Result<()> {
     // Each batch is decoded once and reused for all epochs.
     const BATCH_SIZE: usize = 100_000;
     let use_chunked = num_train_pairs > 200_000;
+    // Jointly train: 29 dense weights + 2^20 sparse weights.
+    // Warm-start dense weights from W_DENSE (the established linear model)
+    // and jointly optimize them with the sparse table under the softmax objective.
+    let mut dense_weights: Vec<f64> = W_DENSE.to_vec();
+    let mut dense_grad_sq: Vec<f64> = vec![1.0f64; DENSE_DIM];
     let mut sparse_table: Vec<f32> = vec![0.0f32; HASH_SIZE];
     let mut grad_sq: Vec<f32> = vec![0.0f32; HASH_SIZE];
     const LR0: f64 = 0.05;
+    const DENSE_LR_SCALE: f64 = 0.1;
     // Fraction of the initial learning rate remaining at the end of the run.
     // AdaGrad already adapts per-slot, so this only needs to be a gentle global
     // anneal -- the previous schedule decayed by ~1e-9 across a full run, which
@@ -422,11 +430,11 @@ fn main() -> Result<()> {
                         extract_sparse_features(&c.dev, roman, c.akshara_count, &aks)
                     })
                     .collect();
-                let base_scores: Vec<f64> = order
+                let dense_feats: Vec<[f64; DENSE_DIM]> = order
                     .iter()
                     .enumerate()
                     .map(|(idx, c)| {
-                        let dense = extract_dense_features(
+                        let raw = extract_dense_features(
                             c,
                             idx,
                             heur[idx],
@@ -435,14 +443,21 @@ fn main() -> Result<()> {
                             &vocab_freq,
                             &ranks,
                         );
-                        (0..DENSE_DIM)
-                            .map(|k| W_DENSE[k] * ((dense[k] - MEAN_DENSE[k]) / STD_DENSE[k]))
-                            .sum()
+                        let mut z = [0.0f64; DENSE_DIM];
+                        for k in 0..DENSE_DIM {
+                            let sd = STD_DENSE[k];
+                            z[k] = if sd.abs() > 1e-12 {
+                                (raw[k] - MEAN_DENSE[k]) / sd
+                            } else {
+                                0.0
+                            };
+                        }
+                        z
                     })
                     .collect();
                 items.push(RerankItem {
                     target_idx,
-                    base_scores,
+                    dense_feats,
                     sparse,
                 });
             }
@@ -457,13 +472,17 @@ fn main() -> Result<()> {
     };
 
     /// Loss and top-1 on the held-out set under the current sparse table.
-    fn dev_eval(items: &[RerankItem], table: &[f32]) -> Option<(f64, f64)> {
+    fn dev_eval(items: &[RerankItem], table: &[f32], dw: &[f64]) -> Option<(f64, f64)> {
         if items.is_empty() {
             return None;
         }
         let (mut loss, mut hits) = (0.0f64, 0usize);
         for s in items {
-            let mut scores = s.base_scores.clone();
+            let mut scores: Vec<f64> = s
+                .dense_feats
+                .iter()
+                .map(|z| dw.iter().zip(z.iter()).map(|(w, x)| w * x).sum::<f64>())
+                .collect();
             for (idx, sf) in s.sparse.iter().enumerate() {
                 for &h in sf {
                     scores[idx] += f64::from(table[h]);
@@ -487,11 +506,11 @@ fn main() -> Result<()> {
         Some((loss / n, hits as f64 / n * 100.0))
     }
 
-    // Snapshot of the best table by dev loss, so a run that starts overfitting
-    // does not have to be thrown away.
-    let mut best_dev: Option<(f64, Vec<f32>)> = None;
+    // Snapshot of the best weights (sparse + dense) by dev loss, so a run that
+    // starts overfitting does not have to be thrown away.
+    let mut best_dev: Option<(f64, Vec<f32>, Vec<f64>)> = None;
 
-    if let Some((l, a)) = dev_eval(&dev_items, &sparse_table) {
+    if let Some((l, a)) = dev_eval(&dev_items, &sparse_table, &dense_weights) {
         println!("  dev before training: loss={l:.4} top-1={a:.2}%");
     }
 
@@ -524,7 +543,6 @@ fn main() -> Result<()> {
                 let cands = decoder.decode_union(roman, RERANK_DECODE_DEPTH, Some(&word_trie));
                 let (order, heur, heur_rank) = rank_candidates(&cands, &vocab_freq);
                 if let Some(target_idx) = order.iter().position(|c| c.dev == *gold) {
-                    let n_cand = order.len();
                     let cand_sparse: Vec<Vec<usize>> = order
                         .iter()
                         .map(|c| {
@@ -532,27 +550,37 @@ fn main() -> Result<()> {
                             extract_sparse_features(&c.dev, roman, c.akshara_count, &aks)
                         })
                         .collect();
-                    let mut base_scores = Vec::with_capacity(n_cand);
-                    for (idx, c) in order.iter().enumerate() {
-                        let dense = extract_dense_features(
-                            c,
-                            idx,
-                            heur[idx],
-                            heur_rank[idx],
-                            roman,
-                            &vocab_freq,
-                            &ranks,
-                        );
-                        dense_stats.push(&dense);
-                        let mut score: f64 = 0.0;
-                        for k in 0..DENSE_DIM {
-                            score += W_DENSE[k] * ((dense[k] - MEAN_DENSE[k]) / STD_DENSE[k]);
-                        }
-                        base_scores.push(score);
+                    let dense_feats: Vec<[f64; DENSE_DIM]> = order
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, c)| {
+                            let raw = extract_dense_features(
+                                c,
+                                idx,
+                                heur[idx],
+                                heur_rank[idx],
+                                roman,
+                                &vocab_freq,
+                                &ranks,
+                            );
+                            let mut z = [0.0f64; DENSE_DIM];
+                            for k in 0..DENSE_DIM {
+                                let sd = STD_DENSE[k];
+                                z[k] = if sd.abs() > 1e-12 {
+                                    (raw[k] - MEAN_DENSE[k]) / sd
+                                } else {
+                                    0.0
+                                };
+                            }
+                            z
+                        })
+                        .collect();
+                    for feats in &dense_feats {
+                        dense_stats.push(feats);
                     }
                     samples.push(RerankItem {
                         target_idx,
-                        base_scores,
+                        dense_feats,
                         sparse: cand_sparse,
                     });
                 }
@@ -566,7 +594,17 @@ fn main() -> Result<()> {
             let mut batch_loss: f64 = 0.0;
             for _ep in 1..=epochs {
                 for s in &samples {
-                    let mut scores = s.base_scores.clone();
+                    let mut scores: Vec<f64> = s
+                        .dense_feats
+                        .iter()
+                        .map(|z| {
+                            dense_weights
+                                .iter()
+                                .zip(z.iter())
+                                .map(|(w, x)| w * x)
+                                .sum::<f64>()
+                        })
+                        .collect();
                     for (idx, sparse_feats) in s.sparse.iter().enumerate() {
                         for &h in sparse_feats {
                             scores[idx] += f64::from(sparse_table[h]);
@@ -577,15 +615,30 @@ fn main() -> Result<()> {
                     let sum_exp: f64 = exp_s.iter().sum();
                     let probs: Vec<f64> = exp_s.iter().map(|&e| e / (sum_exp + 1e-12)).collect();
                     batch_loss += -probs[s.target_idx].max(1e-12).ln();
+                    let mut sample_dense_grad = [0.0f64; DENSE_DIM];
                     for (idx, p) in probs.iter().enumerate() {
                         let grad = if idx == s.target_idx { *p - 1.0 } else { *p };
                         if grad.abs() > 1e-5 {
+                            // Update sparse weights
                             for &h in &s.sparse[idx] {
                                 let g = grad as f32;
                                 grad_sq[h] += g * g;
                                 let eff_lr = (lr as f32) / (grad_sq[h].sqrt() + 1e-4);
                                 sparse_table[h] -= eff_lr * g;
                             }
+                            // Accumulate true sample gradient for dense weights:
+                            // dL/dw_k = sum_idx (p_idx - y_idx) * z_{idx, k}
+                            for (k, grad_val) in sample_dense_grad.iter_mut().enumerate() {
+                                *grad_val += grad * s.dense_feats[idx][k];
+                            }
+                        }
+                    }
+                    // Apply dense weight update once per sample
+                    for (k, &gd) in sample_dense_grad.iter().enumerate() {
+                        if gd.abs() > 1e-6 {
+                            dense_grad_sq[k] += gd * gd;
+                            let eff_lr_d = lr * DENSE_LR_SCALE / (dense_grad_sq[k].sqrt() + 1e-4);
+                            dense_weights[k] -= eff_lr_d * gd;
                         }
                     }
                 }
@@ -600,14 +653,14 @@ fn main() -> Result<()> {
                 samples.len(),
                 lr
             );
-            if let Some((dl, da)) = dev_eval(&dev_items, &sparse_table) {
-                let better = best_dev.as_ref().is_none_or(|(b, _)| dl < *b);
+            if let Some((dl, da)) = dev_eval(&dev_items, &sparse_table, &dense_weights) {
+                let better = best_dev.as_ref().is_none_or(|(b, _, _)| dl < *b);
                 println!(
                     "      dev: loss={dl:.4} top-1={da:.2}%{}",
                     if better { "  <- best" } else { "" }
                 );
                 if better {
-                    best_dev = Some((dl, sparse_table.clone()));
+                    best_dev = Some((dl, sparse_table.clone(), dense_weights.clone()));
                 }
             }
             lr *= lr_decay_per_batch;
@@ -625,7 +678,6 @@ fn main() -> Result<()> {
             let cands = decoder.decode_union(roman, RERANK_DECODE_DEPTH, Some(&word_trie));
             let (order, heur, heur_rank) = rank_candidates(&cands, &vocab_freq);
             if let Some(target_idx) = order.iter().position(|c| c.dev == *gold) {
-                let n_cand = order.len();
                 let cand_sparse: Vec<Vec<usize>> = order
                     .iter()
                     .map(|c| {
@@ -633,27 +685,37 @@ fn main() -> Result<()> {
                         extract_sparse_features(&c.dev, roman, c.akshara_count, &aks)
                     })
                     .collect();
-                let mut base_scores = Vec::with_capacity(n_cand);
-                for (idx, c) in order.iter().enumerate() {
-                    let dense = extract_dense_features(
-                        c,
-                        idx,
-                        heur[idx],
-                        heur_rank[idx],
-                        roman,
-                        &vocab_freq,
-                        &ranks,
-                    );
-                    dense_stats.push(&dense);
-                    let mut score: f64 = 0.0;
-                    for k in 0..DENSE_DIM {
-                        score += W_DENSE[k] * ((dense[k] - MEAN_DENSE[k]) / STD_DENSE[k]);
-                    }
-                    base_scores.push(score);
+                let dense_feats: Vec<[f64; DENSE_DIM]> = order
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, c)| {
+                        let raw = extract_dense_features(
+                            c,
+                            idx,
+                            heur[idx],
+                            heur_rank[idx],
+                            roman,
+                            &vocab_freq,
+                            &ranks,
+                        );
+                        let mut z = [0.0f64; DENSE_DIM];
+                        for k in 0..DENSE_DIM {
+                            let sd = STD_DENSE[k];
+                            z[k] = if sd.abs() > 1e-12 {
+                                (raw[k] - MEAN_DENSE[k]) / sd
+                            } else {
+                                0.0
+                            };
+                        }
+                        z
+                    })
+                    .collect();
+                for feats in &dense_feats {
+                    dense_stats.push(feats);
                 }
                 samples.push(RerankItem {
                     target_idx,
-                    base_scores,
+                    dense_feats,
                     sparse: cand_sparse,
                 });
             }
@@ -668,7 +730,17 @@ fn main() -> Result<()> {
             let mut ep_loss: f64 = 0.0;
             let mut ep_hits: usize = 0;
             for s in &samples {
-                let mut scores = s.base_scores.clone();
+                let mut scores: Vec<f64> = s
+                    .dense_feats
+                    .iter()
+                    .map(|z| {
+                        dense_weights
+                            .iter()
+                            .zip(z.iter())
+                            .map(|(w, x)| w * x)
+                            .sum::<f64>()
+                    })
+                    .collect();
                 for (idx, sparse_feats) in s.sparse.iter().enumerate() {
                     for &h in sparse_feats {
                         scores[idx] += f64::from(sparse_table[h]);
@@ -687,23 +759,38 @@ fn main() -> Result<()> {
                 {
                     ep_hits += 1;
                 }
+                let mut sample_dense_grad = [0.0f64; DENSE_DIM];
                 for (idx, p) in probs.iter().enumerate() {
                     let grad = if idx == s.target_idx { *p - 1.0 } else { *p };
                     if grad.abs() > 1e-5 {
+                        // Update sparse weights
                         for &h in &s.sparse[idx] {
                             let g = grad as f32;
                             grad_sq[h] += g * g;
                             let eff_lr = (lr as f32) / (grad_sq[h].sqrt() + 1e-4);
                             sparse_table[h] -= eff_lr * g;
                         }
+                        // Accumulate true sample gradient for dense weights:
+                        // dL/dw_k = sum_idx (p_idx - y_idx) * z_{idx, k}
+                        for (k, grad_val) in sample_dense_grad.iter_mut().enumerate() {
+                            *grad_val += grad * s.dense_feats[idx][k];
+                        }
+                    }
+                }
+                // Apply dense weight update once per sample
+                for (k, &gd) in sample_dense_grad.iter().enumerate() {
+                    if gd.abs() > 1e-6 {
+                        dense_grad_sq[k] += gd * gd;
+                        let eff_lr_d = lr * DENSE_LR_SCALE / (dense_grad_sq[k].sqrt() + 1e-4);
+                        dense_weights[k] -= eff_lr_d * gd;
                     }
                 }
             }
             lr *= 0.8;
             if !samples.is_empty() {
-                let dev = dev_eval(&dev_items, &sparse_table);
+                let dev = dev_eval(&dev_items, &sparse_table, &dense_weights);
                 let better = match (&dev, &best_dev) {
-                    (Some((dl, _)), Some((b, _))) => dl < b,
+                    (Some((dl, _)), Some((b, _, _))) => dl < b,
                     (Some(_), None) => true,
                     _ => false,
                 };
@@ -722,7 +809,7 @@ fn main() -> Result<()> {
                     }
                 );
                 if let (Some((dl, _)), true) = (dev, better) {
-                    best_dev = Some((dl, sparse_table.clone()));
+                    best_dev = Some((dl, sparse_table.clone(), dense_weights.clone()));
                 }
             }
         }
@@ -736,19 +823,20 @@ fn main() -> Result<()> {
     );
     let pack_t0 = Instant::now();
 
-    // Pack the table that scored best on held-out data, not necessarily the
-    // last one: with ~1e6 unregularised sparse slots, later batches can overfit.
-    if let Some((dl, best)) = best_dev {
-        let final_dl = dev_eval(&dev_items, &sparse_table).map(|(l, _)| l);
+    // Pack the weights that scored best on held-out data, not necessarily the
+    // last ones: with ~1e6 unregularised sparse slots, later batches can overfit.
+    if let Some((dl, best_sparse, best_dense)) = best_dev {
+        let final_dl = dev_eval(&dev_items, &sparse_table, &dense_weights).map(|(l, _)| l);
         if final_dl.is_some_and(|f| f > dl + 1e-9) {
             println!(
-                "Packing the best-by-dev sparse table (dev loss {:.4}) rather than the final one ({:.4}).",
+                "Packing the best-by-dev weights (dev loss {:.4}) rather than the final ({:.4}).",
                 dl,
                 final_dl.unwrap_or(f64::NAN)
             );
-            sparse_table = best;
+            sparse_table = best_sparse;
+            dense_weights = best_dense;
         } else {
-            println!("Final sparse table is the best by dev loss ({dl:.4}).");
+            println!("Final weights are the best by dev loss ({dl:.4}).");
         }
     }
 
@@ -861,8 +949,9 @@ fn main() -> Result<()> {
         1.0 / f64::from(sparse_scale),
         vocab_freq,
     );
-    unified.dense_mean = dense_mean;
-    unified.dense_std = dense_std;
+    unified.dense_mean = MEAN_DENSE.to_vec();
+    unified.dense_std = STD_DENSE.to_vec();
+    unified.dense_weights = dense_weights;
     unified
         .save(&out_path)
         .map_err(|e| anyhow::anyhow!("save unified model: {e}"))?;

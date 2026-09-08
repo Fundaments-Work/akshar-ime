@@ -418,10 +418,16 @@ pub fn rerank_with_table(
         custom_sparse_table,
         custom_sparse_scale,
         DenseNorm::compiled_in(),
+        None, // No jointly-trained dense weights: use compiled-in W_DENSE.
     )
 }
 
-/// As `rerank_with_table`, with explicit dense-feature normalisation statistics.
+/// As `rerank_with_table`, with explicit dense-feature normalisation statistics
+/// and optionally jointly-trained dense weights (v6+ containers).
+///
+/// When `custom_dense_weights` is `Some`, those 29 weights are used in place of
+/// the compiled-in `W_DENSE` constant.  `None` falls back to `W_DENSE` exactly
+/// as before, so v5 and earlier containers are unaffected.
 #[allow(clippy::too_many_arguments)]
 pub fn rerank_with_norm(
     roman: &str,
@@ -431,6 +437,7 @@ pub fn rerank_with_norm(
     custom_sparse_table: Option<&[i8]>,
     custom_sparse_scale: Option<f64>,
     norm: DenseNorm<'_>,
+    custom_dense_weights: Option<&[f64]>,
 ) -> Vec<(String, f64)> {
     if candidates.is_empty() {
         return vec![];
@@ -473,8 +480,12 @@ pub fn rerank_with_norm(
         let sparse = extract_sparse_features(&c.dev, roman, c.akshara_count, &aks);
 
         let mut s = 0.0f64;
+        // Use jointly-trained dense weights from the v6+ container when available;
+        // fall back to the compiled-in W_DENSE constant for v5 and earlier.
+        let w_dense: &[f64] = custom_dense_weights.unwrap_or(&W_DENSE);
         for k in 0..DENSE_DIM {
-            s += W_DENSE[k] * norm.z(k, dense[k]);
+            let wk = w_dense.get(k).copied().unwrap_or(W_DENSE[k]);
+            s += wk * norm.z(k, dense[k]);
         }
         for &h in sparse
             .iter()

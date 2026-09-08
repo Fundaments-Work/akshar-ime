@@ -74,6 +74,18 @@ fn main() {
                 (v_sz as f64 / m_bytes as f64) * 100.0,
                 unified.vocab_freq.len()
             );
+            println!(
+                "\n--- Dense Reranker Weights ({} weights) ---",
+                unified.dense_weights.len()
+            );
+            for (k, w) in unified.dense_weights.iter().enumerate() {
+                let mean = unified.dense_mean.get(k).copied().unwrap_or(0.0);
+                let std = unified.dense_std.get(k).copied().unwrap_or(1.0);
+                println!(
+                    "    feat[{:02}]: w={:>10.6}  (mean={:.3}, std={:.3})",
+                    k, w, mean, std
+                );
+            }
 
             println!("\n--- Translit Sub-components (as encoded) ---");
             let other_sz = misc_sz;

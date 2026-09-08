@@ -25,10 +25,12 @@ pub const UNIFIED_MAGIC: [u8; 4] = *b"AKSH";
 ///       codebook per table, via `core::codec`
 ///   v4  removed word-bigram table (19.5 MB for +0.16pp — not shipped)
 ///   v5  carries the reranker's dense-feature normalisation statistics
+///   v6  adds `dense_weights` (jointly-trained dense reranker weights, 29 elems)
 ///
-/// v1-v4 still load (bigrams dropped; v4 falls back to the compiled-in
-/// normalisation constants). v5 is what `save` writes.
-pub const UNIFIED_VERSION: u32 = 5;
+/// v1-v5 still load (bigrams dropped; v4 falls back to the compiled-in
+/// normalisation constants; v5 loads with empty dense_weights). v6 is what
+/// `save` writes.
+pub const UNIFIED_VERSION: u32 = 6;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct UnifiedModel {
@@ -52,6 +54,10 @@ pub struct UnifiedModel {
     pub dense_mean: Vec<f64>,
     #[serde(default)]
     pub dense_std: Vec<f64>,
+    /// Jointly-trained dense reranker weights (one per dense feature, 29 elements).
+    /// Empty means "use the compiled-in defaults" (v1-v5 containers).
+    #[serde(default)]
+    pub dense_weights: Vec<f64>,
 }
 
 /// The v1 container layout, kept only so existing `akshar.model` files still
@@ -80,6 +86,7 @@ impl From<UnifiedModelV1> for UnifiedModel {
             vocab_freq: v1.vocab_freq,
             dense_mean: Vec::new(),
             dense_std: Vec::new(),
+            dense_weights: Vec::new(),
         }
     }
 }
@@ -108,6 +115,7 @@ impl From<UnifiedModelV2> for UnifiedModel {
             vocab_freq: v2.vocab_freq,
             dense_mean: Vec::new(),
             dense_std: Vec::new(),
+            dense_weights: Vec::new(),
         }
     }
 }
@@ -163,6 +171,7 @@ impl UnifiedModel {
             // normalisation constants; `train` overwrites these.
             dense_mean: Vec::new(),
             dense_std: Vec::new(),
+            dense_weights: Vec::new(),
         }
     }
 
@@ -175,6 +184,7 @@ impl UnifiedModel {
         let version =
             peek_version(bytes).ok_or("Invalid magic header: not an Akshar unified model")?;
         let mut model: Self = match version {
+            6 => bincode::deserialize::<UnifiedModelV6>(bytes)?.try_into()?,
             5 => bincode::deserialize::<UnifiedModelV5>(bytes)?.try_into()?,
             4 => bincode::deserialize::<UnifiedModelV4>(bytes)?.try_into()?,
             3 => {
@@ -205,6 +215,7 @@ impl UnifiedModel {
                     vocab_freq,
                     dense_mean: Vec::new(),
                     dense_std: Vec::new(),
+                    dense_weights: Vec::new(),
                 }
             }
             2 => bincode::deserialize::<UnifiedModelV2>(bytes)?.into(),
@@ -221,12 +232,12 @@ impl UnifiedModel {
     pub fn save(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         let f = File::create(path)?;
         let mut writer = BufWriter::new(f);
-        bincode::serialize_into(&mut writer, &UnifiedModelV5::from(self))?;
+        bincode::serialize_into(&mut writer, &UnifiedModelV6::from(self))?;
         Ok(())
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        Ok(bincode::serialize(&UnifiedModelV5::from(self))?)
+        Ok(bincode::serialize(&UnifiedModelV6::from(self))?)
     }
 
     pub fn validate(&self) -> bool {
@@ -350,7 +361,39 @@ impl TryFrom<UnifiedModelV4> for UnifiedModel {
             vocab_freq,
             dense_mean: Vec::new(),
             dense_std: Vec::new(),
+            dense_weights: Vec::new(),
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// v6: v5 fields plus jointly-trained dense reranker weights
+// ---------------------------------------------------------------------------
+
+/// The v6 layout: every v5 field, plus the dense reranker weights that are
+/// trained jointly with the EM/LM and therefore belong in the model artifact.
+#[derive(Serialize, Deserialize)]
+struct UnifiedModelV6 {
+    v5: UnifiedModelV5,
+    dense_weights: Vec<f64>,
+}
+
+impl From<&UnifiedModel> for UnifiedModelV6 {
+    fn from(m: &UnifiedModel) -> Self {
+        Self {
+            v5: UnifiedModelV5::from(m),
+            dense_weights: m.dense_weights.clone(),
+        }
+    }
+}
+
+impl TryFrom<UnifiedModelV6> for UnifiedModel {
+    type Error = Box<dyn std::error::Error>;
+
+    fn try_from(v: UnifiedModelV6) -> Result<Self, Self::Error> {
+        let mut m = UnifiedModel::try_from(v.v5)?;
+        m.dense_weights = v.dense_weights;
+        Ok(m)
     }
 }
 

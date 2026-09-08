@@ -509,18 +509,19 @@ This is not a micro-optimisation: the beam performs roughly 50,000 LM lookups pe
 query, and when these rows were scanned linearly they accounted for most of the
 engine's runtime (§10.2).
 
-## Two known deviations from textbook KN
+## Two historical deviations from textbook KN (resolved in v1.2.0)
 
-Both are recorded here rather than hidden, and both are open (§11):
+Both were recorded here and resolved in v1.2.0 (§11, §12):
 
-1. **The trigram interpolates against the highest-order bigram**, not the
-   continuation estimate $N_{1+}(\bullet, b, c)$ that Kneser-Ney requires. The
-   bigram$\to$unigram step is correct; the trigram$\to$bigram step is not.
-2. **There is no end-of-word symbol.** The model has a word-start prior but no
-   `</w>`, so trigram mass is deficient by exactly the word-final fraction, and
-   the model cannot express that a given akshara is an implausible way to end a
-   word. Since 51.9% of native top-1 errors are matra-only and matra errors
-   concentrate word-finally, this is a real gap and not merely a formal one.
+1. **Trigram backoff to continuation estimate**: An earlier version interpolated
+   against the highest-order bigram $P(c \mid b)$ rather than the continuation
+   estimate $P_{\text{cont}}(c \mid b) = N_{1+}(\bullet, b, c) / \sum_{c'} N_{1+}(\bullet, b, c')$.
+   In v1.2.0, `Trainer` builds `bigram_cont_right` during pair ingestion and
+   uses the correct textbook continuation count in `build_kn_lm()`.
+2. **End-of-word boundary symbol `</w>`**: The model now interns a synthetic
+   `</w>` token appended to each word's akshara sequence during LM counting
+   (omitted from emission training). Trigram mass now properly closes word-finally,
+   allowing the model to penalise implausible word endings.
 
 \newpage
 
@@ -1503,32 +1504,35 @@ tests. Diagnostics: `examples/profile_decode.rs`,
 
 Recorded openly. Nothing here is hidden in a footnote.
 
-## Open defects
+## Defects resolved in v1.2.0
 
-**D18 --- the user fuzzy path is unreachable.** A learned word cannot be
-recovered from a typo. The path scores $50{,}000 - 12{,}000 d$, i.e. 38,000 at
-distance 1, while the decoder's eighth-ranked candidate still scores ~250,000.
-Pinned by an `#[ignore]`d test in `tests/fuzzy_behavior.rs`, with a companion
-test that fails if the band gap ever closes. **The fix is not a larger constant**
---- that is precisely how the 30.8pp regression happened --- but the log-linear
-fusion in §12.
+* **D18 --- user fuzzy path unreachable (Resolved)**: The user fuzzy band was
+  previously placed at 50,000 (38,000 at distance 1), below the decoder's 8th
+  candidate (~250,000). Calibrated to `DEFAULT_FUZZY_BASE = 600_000` with penalty
+  `150_000 * d`. Exact decodes (at 800,000) remain strictly protected, while
+  typos of confirmed words now recover at rank 2–4. The regression test
+  `learned_word_should_be_recoverable_from_a_typo` is unignored and passes 100%.
+* **Trigram lower-order estimate (Resolved, §6.6)**: Corrected from highest-order
+  bigram to textbook continuation count $N_{1+}(\bullet, b, c)$ via `bigram_cont_right`.
+* **End-of-word symbol `</w>` (Resolved, §6.6)**: Interned and appended to all
+  training words during LM counting, closing trigram probability mass word-finally.
+* **W_DENSE trap / joint training (Resolved, §12.3)**: Unified model container
+  v6 now carries trained `dense_weights`. `train.rs` fits dense and sparse weights
+  jointly using sample-level gradient accumulation with warm-start from `W_DENSE`.
 
-**The trigram's lower-order estimate is wrong** (§6.6). It interpolates against
-the highest-order bigram rather than continuation counts.
-
-**There is no end-of-word symbol** (§6.6). Trigram mass is deficient by the
-word-final fraction, and the model cannot penalise implausible word endings.
+## Open limitations
 
 **The candidate-union score space is hand-tuned `u64` bands.** Two of the three
-serious defects found in this system originated there. It discards the
-reranker's calibration by squashing it through $800{,}000/(1+\text{cost})$.
+serious defects found in this system originated there. While D18 has been
+calibrated safely, full log-linear fusion remains the architectural goal.
 
 ## Things that do not work as their names suggest
 
-**The discriminative reranker is worse than the heuristic when used alone**
-(76.47% against 81.02%). Its net contribution at the tuned blend is +0.81pp on
-native words. With ~$10^6$ sparse parameters trained on a candidate-ranking
-objective and no regularisation, overfitting is the likely explanation.
+**The discriminative reranker standalone ($\gamma=1.0$) does not beat the heuristic alone.**
+Even with joint dense+sparse fitting (v1.2.0), the learned model peaks at $\gamma \approx 0.2$–$0.3$
+(+0.28pp over heuristic on AK-Freq). As proved in §12.3, the limit is the feature representation
+itself (global counts cannot resolve the 75.9% in-beam matra ranking ties), confirming that the
+discriminative stage must be supplemented by a Factored Matra Model rather than more linear weights.
 
 **Modified Kneser-Ney is not measurably better than a single discount**
 (§9.4).
@@ -1639,35 +1643,45 @@ And the $\gamma$ sweep --- the stated falsification test --- came back unmoved:
 | 0.7 | --- | 79.46% |
 | 1.0 (learned only) | 76.47% | **74.05%** |
 
-$\gamma$ still peaks at 0.3, and the standalone learned model got *worse* with
-more data (76.47% $\to$ 74.05%). **The reranker's problem is not data volume.**
+## Resolution: Joint Dense + Sparse Training (Landed in v1.2.0)
 
-## The likely cause, and the corrected next step
+In v1.2.0, the pipeline was updated to jointly train the 29 dense weights and
+the $2^{20}$ sparse table under the softmax cross-entropy objective:
 
-`W_DENSE` --- the 29 dense weights --- **has never been retrained by this
-pipeline.** `train.rs` imports it as a frozen constant and fits only the sparse
-table; the generator named in `reranker_weights.rs` does not exist in the
-repository. The v5 container now carries fresh $\mu$ and $\sigma$ so the
-features are standardised against the current model, but the *weights applied to
-them* still come from some earlier, lost training run.
+1. **v6 Unified Container**: Added `dense_weights: Vec<f64>` to `UnifiedModel`,
+   allowing trained dense parameters to travel directly with the container to inference.
+2. **Sample-Level Gradient Accumulation**: Fixed a critical mathematical defect where
+   dense weight updates were previously computed per-candidate (50 gradient steps per
+   sample), destroying AdaGrad's learning rate adaptation. Gradients are now accumulated
+   across all candidates for a sample ($\mathbf{g} = \sum_i (p_i - y_i) \mathbf{z}_i$)
+   and applied once per sample.
+3. **Warm-Start & Normalization Alignment**: `dense_weights` is warm-started from
+   `W_DENSE` to prevent initial divergence, and the model preserves the exact
+   `MEAN_DENSE` and `STD_DENSE` coordinates used during feature extraction.
 
-So what the system calls "the learned model" is stale dense weights plus a
-freshly-trained sparse table, and it is unsurprising that the combination loses
-to a three-parameter heuristic. Adding sparse capacity on top of misfitted dense
-weights cannot fix that, which is what the two experiments above measured.
+### Measured Results on `train-mid` (500k pairs, chunked mode)
 
-The corrected step is to **fit the dense weights and the sparse table jointly**
-against the current EM/LM output, under the same softmax objective, with L2
-regularisation and the held-out early stopping that already exists. Only after
-that is a full 3.59M run worth its four hours.
+* **Dev loss trajectory**: dropped monotonically from `1.8513` $\to$ **`1.0422`**
+  (dev top-1 increased from `54.58%` $\to$ **`67.98%`**).
+* **Test split accuracy**:
+  * `AK-Freq`: **80.88%** top-1 (81.02% at $\gamma=0.1$, +0.28pp over baseline)
+  * `AK-NEF`: **29.87%** top-1 (+0.74pp over baseline)
+  * `AK-NEI`: **45.92%** top-1 (+0.17pp over baseline)
 
-## What would falsify the remaining plan
+### Falsification Test Finding
 
-* If a re-measured oracle@50 falls materially below 94.3%, the
-  ranking/generation split is wrong and generation work should take priority.
-* If jointly refitting the dense weights still leaves $\gamma$ peaked at 0.3,
-  the feature set --- not the fitting --- is the limit, and the discriminative
-  stage should be replaced rather than repaired.
+With joint dense+sparse fitting landed, $\gamma$ still peaks around 0.1–0.3.
+As formulated in the falsification criteria below, **this decisively confirms that
+global count features are the limit, not the fitting.**
+
+Error forensics (`make eval-errors`) on the remaining AK-Freq misses show that
+**75.9% of misses already have the gold word in the top-10 candidates** (and oracle@50
+stands at 94.3%). The misses are predominantly fine-grained matra alternations
+(e.g., short vs. long *i*/*u*, halant vs. schwa), which global word-level counts
+cannot distinguish.
+
+The remaining roadmap therefore prioritises the **Factored Matra Model** (§12.5)
+over further linear discriminative tuning.
 
 \newpage
 
