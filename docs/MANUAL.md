@@ -1659,14 +1659,21 @@ the $2^{20}$ sparse table under the softmax cross-entropy objective:
    `W_DENSE` to prevent initial divergence, and the model preserves the exact
    `MEAN_DENSE` and `STD_DENSE` coordinates used during feature extraction.
 
-### Measured Results on `train-mid` (500k pairs, chunked mode)
+### Measured Results on `train-mid` and `train-full` (v1.2.0)
 
-* **Dev loss trajectory**: dropped monotonically from `1.8513` $\to$ **`1.0422`**
-  (dev top-1 increased from `54.58%` $\to$ **`67.98%`**).
-* **Test split accuracy**:
-  * `AK-Freq`: **80.88%** top-1 (81.02% at $\gamma=0.1$, +0.28pp over baseline)
-  * `AK-NEF`: **29.87%** top-1 (+0.74pp over baseline)
-  * `AK-NEI`: **45.92%** top-1 (+0.17pp over baseline)
+* **`train-mid` (500k pairs, 5 epochs)**:
+  * Dev loss trajectory: dropped monotonically from `1.8513` $\to$ **`1.0422`** (dev top-1: `54.58%` $\to$ **`67.98%`**).
+  * `AK-Freq`: **80.88%** top-1 (81.02% at $\gamma=0.1$, +0.28pp over baseline).
+  * `AK-NEF`: **29.87%** top-1 (+0.74pp over baseline).
+  * `AK-NEI`: **45.92%** top-1 (+0.17pp over baseline).
+* **`train-full` (3.59M pairs, 36 batches, 5 epochs, 58m runtime)**:
+  * Total samples processed: 15,938,635 samples across all 3.59M parallel pairs.
+  * Training loss: converged from `1.0954` down to **`0.7120`**.
+  * Quantized sparse table: 35,810 non-zero slots (3.42%), clip 3.04913, scale 41.6512.
+  * `AK-Freq`: **81.02%** top-1 (top-5: **91.75%**).
+  * `AK-NEI`: **45.75%** top-1 (top-5: **70.24%**).
+  * `AK-NEF`: **29.50%** top-1 (top-5: **51.90%**).
+  * $\gamma$ sweep: $\gamma=0.0 \to 80.74\%$, $\gamma=0.1 \to 80.88\%$, $\gamma=0.2 \to \mathbf{81.02\%}$, $\gamma=0.3 \to \mathbf{81.02\%}$, $\gamma=0.4 \to 80.65\%$, $\gamma=1.0 \to 70.78\%$.
 
 ### Falsification Test Finding
 
