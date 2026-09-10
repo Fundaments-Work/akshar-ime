@@ -57,6 +57,16 @@ static void ibus_devanagari_engine_init_instance(IBusDevanagariEngine *engine)
 static void ibus_devanagari_engine_init(IBusDevanagariEngine *engine) { ibus_devanagari_engine_init_instance(engine); }
 static void ibus_devanagari_engine_finalize(GObject *object)
 {
+    IBusDevanagariEngine *self = (IBusDevanagariEngine *)object;
+    // Exp 4: previously leaked preedit_string + table on every engine switch.
+    if (self->table) {
+        g_object_unref(self->table);
+        self->table = NULL;
+    }
+    if (self->preedit_string) {
+        g_string_free(self->preedit_string, TRUE);
+        self->preedit_string = NULL;
+    }
     g_engine_instance_count--;
     if (g_engine_instance_count == 0)
     {
@@ -85,10 +95,12 @@ static void update_preedit_and_lookup(IBusDevanagariEngine *devanagari_engine)
     }
 
     IBusText *preedit_text = ibus_text_new_from_string(preedit_str);
-    ibus_engine_update_preedit_text(engine, preedit_text, strlen(preedit_str), TRUE);
+    ibus_engine_update_preedit_text(engine, preedit_text, g_utf8_strlen(preedit_str, -1), TRUE);
     ibus_lookup_table_clear(devanagari_engine->table);
 
     char *suggestions_json = akshar_ime_get_suggestions(preedit_str);
+    if (!suggestions_json)
+        return;
     json_error_t error;
     json_t *root = json_loads(suggestions_json, 0, &error);
 
@@ -127,9 +139,12 @@ static void commit_best_candidate(IBusDevanagariEngine *devanagari_engine)
     const char *preedit_for_confirm = g_strdup(devanagari_engine->preedit_string->str);
     IBusText *commit_text = NULL;
 
-    // First, try to get the user-selected candidate
+    // First, try to get the user-selected candidate (bounds-checked: the
+    // table may have been repopulated since the cursor moved).
+    guint n_candidates = ibus_lookup_table_get_number_of_candidates(devanagari_engine->table);
     guint index = ibus_lookup_table_get_cursor_pos(devanagari_engine->table);
-    commit_text = ibus_lookup_table_get_candidate(devanagari_engine->table, index);
+    if (index < n_candidates)
+        commit_text = ibus_lookup_table_get_candidate(devanagari_engine->table, index);
     if (commit_text)
     {
         g_object_ref(commit_text); // Increment ref count because we are using it
@@ -139,6 +154,11 @@ static void commit_best_candidate(IBusDevanagariEngine *devanagari_engine)
     if (!commit_text)
     {
     char *suggestions_json = akshar_ime_get_suggestions(preedit_for_confirm);
+        if (!suggestions_json)
+        {
+            g_free((gpointer)preedit_for_confirm);
+            return;
+        }
         json_error_t error;
         json_t *root = json_loads(suggestions_json, 0, &error);
         if (root && json_is_array(root) && json_array_size(root) > 0)
@@ -199,6 +219,8 @@ static gboolean ibus_devanagari_engine_process_key_event(IBusEngine *engine, gui
         // Now, transliterate and commit the symbol itself
         char symbol_str[2] = {(char)keyval, '\0'};
         char *suggestions_json = akshar_ime_get_suggestions(symbol_str);
+        if (!suggestions_json)
+            return TRUE;
         json_error_t error;
         json_t *root = json_loads(suggestions_json, 0, &error);
         if (root && json_is_array(root) && json_array_size(root) > 0)
@@ -257,7 +279,13 @@ static gboolean ibus_devanagari_engine_process_key_event(IBusEngine *engine, gui
     case IBUS_KEY_BackSpace:
         if (has_preedit)
         {
-            g_string_truncate(devanagari_engine->preedit_string, devanagari_engine->preedit_string->len - 1);
+            // Exp 4: byte-truncate splits UTF-8. Step back one full character.
+            GString *s = devanagari_engine->preedit_string;
+            if (s->len > 0) {
+                const gchar *end = s->str + s->len;
+                const gchar *prev = g_utf8_prev_char(end);
+                g_string_truncate(s, prev - s->str);
+            }
             update_preedit_and_lookup(devanagari_engine);
             return TRUE;
         }
@@ -288,8 +316,14 @@ int main(int argc, char **argv)
     ibus_factory_add_engine(factory, "devanagari-smart", IBUS_TYPE_DEVANAGARI_ENGINE);
     if (argc > 1 && strcmp(argv[1], "--ibus") == 0)
     {
-        ibus_bus_request_name(bus, "org.freedesktop.IBus.AksharDevanagari", 0);
+        if (!ibus_bus_request_name(bus, "org.freedesktop.IBus.AksharDevanagari", 0)) {
+            g_object_unref(factory);
+            g_object_unref(bus);
+            return 1;
+        }
     }
     ibus_main();
+    g_object_unref(factory);
+    g_object_unref(bus);
     return 0;
 }

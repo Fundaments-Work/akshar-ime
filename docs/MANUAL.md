@@ -105,19 +105,28 @@ attainable (§12).
 ## Measured performance
 
 On the held-out AI4Bharat Aksharantar test split (4,101 cases), measured
-2026-09-06 on `data/akshar.model` at default settings and re-verified
-2026-09-08 after the v1.2.0 dependency migration (`make eval`,
-`make eval-full`, `make ablate` — every figure below reproduced identically):
+2026-09-06 on `data/akshar.model` at default settings, re-verified
+2026-09-08 after the v1.2.0 dependency migration (every figure below
+reproduced identically), and re-measured 2026-09-10 after the pipeline
+correctness fixes + `make train-mid` retrain (`make eval`,
+`make eval-full`, `make ablate`):
 
 | Split | $n$ | top-1 | top-5 |
 | :--- | ---: | ---: | ---: |
-| `AK-Freq` (native words) | 2,108 | **81.83%** | 92.22% |
-| `AK-NEI` (named entities) | 1,176 | 47.79% | 69.81% |
-| `AK-NEF` (named entities) | 817 | 31.21% | 53.00% |
-| All cases | 4,101 | 61.98% | 77.98% |
+| `AK-Freq` (native words) | 2,108 | **80.98%** | 91.84% |
+| `AK-NEI` (named entities) | 1,176 | 45.32% | 70.15% |
+| `AK-NEF` (named entities) | 817 | 29.01% | 51.53% |
+| All cases | 4,101 | 60.40% | 77.59% |
 
-Bootstrap 95% CI on the pooled top-1 is [60.61%, 63.36%]; MRR is 0.6906.
-Character error rate on `AK-Freq` top-1 is 3.90%.
+The 2026-09-08 model measured 81.83 / 47.79 / 31.21 / 61.98% on the same
+harness. The retrain reproduces it within bootstrap noise (pooled top-1
+95% CI [58.94%, 61.89%] vs [60.61%, 63.36%] before; the intervals overlap),
+so no accuracy was lost to the pipeline fixes — but the headline figures
+above are the ones that reproduce on the shipped artifact.
+
+Bootstrap 95% CI on the pooled top-1 is [58.94%, 61.89%]; MRR is 0.6798.
+Character error rate on `AK-Freq` top-1 is 3.90% (measured 2026-09-08;
+not re-measured on the retrain).
 
 For reference, **IndicXlit** (AI4Bharat; an ~11M-parameter transformer) reports
 80.25% top-1 on the native split and 52.67% on named entities *without* LM
@@ -130,7 +139,7 @@ is substantially behind either way.
 | :--- | ---: | ---: |
 | Container size | 11.37 MB | 8.91 MB |
 | Brotli-compressed | 6.72 MB | 4.94 MB |
-| Query latency | 0.63--0.82 ms (0.75 ms re-measured 2026-09-08, $k=10$, full set) | not re-measured since 2026-09-06 |
+| Query latency | 0.63--0.82 ms (0.724 ms re-measured 2026-09-10, $k=10$, full set) | not re-measured since 2026-09-06 |
 | Cold start | ~1.5 s (re-verified 2026-09-08: 1.50 s wall for a 5-case process) | not re-measured |
 
 \newpage
@@ -1222,12 +1231,14 @@ reproducible from the shipped binary rather than from patched builds.
 | `AKSHAR_DATA_DIR=<dir>` | model directory override (default: `data/`, then
 `~/.local/share/akshar-ime`, then `/usr/share/akshar-ime`) |
 | `AKSHAR_USER_TRIE_BASE=<n>` | learned-word base score (default 900,000) |
-| `AKSHAR_FUZZY_BASE=<n>` | fuzzy-match base score (default 50,000; penalty
-12,000 per edit distance) |
+| `AKSHAR_FUZZY_BASE=<n>` | fuzzy-match base score (default 600,000; penalty
+150,000 per edit distance) |
 | `AKSHAR_KN_FIXED_DISCOUNT=1` | single-discount LM ablation for the §9.4 comparison |
 
 ## The rerank stage, built up from raw decoder order
 
+Measured 2026-09-08 (previous model; kept as the honest decomposition —
+the 2026-09-10 retrain did not re-measure the raw-decoder baseline row).
 An earlier version of this table treated $\gamma = 0$ as "no reranking". That
 was wrong: $\gamma = 0$ still applies the frequency heuristic, which *is* part of
 the rerank stage. Building the stage up from the generative ranking gives the
@@ -1240,31 +1251,41 @@ honest decomposition:
 | $+$ 29 dense features | 81.93% | +0.91 |
 | $+$ $2^{20}$ sparse table (shipped) | 81.83% | −0.10 |
 
-**Reranking is worth +6.45pp overall** --- the second-largest contribution in
-the system after the trigram LM. But **87% of that value is the
+**Reranking is worth +6.45pp overall on the 2026-09-08 model (+5.93pp on the
+retrain)** --- the second-largest contribution in the system after the
+trigram LM. But **most of that value is the
 three-parameter heuristic**
 
 $$h(D) = \texttt{emit} + 0.85\,\texttt{lm} - 0.75\log(1 + f(D)),$$
 
 whose entire content is a corpus frequency prior the generative model does not
-have. The $10^6$-parameter learned stage adds +0.91pp on top of it, and the
-sparse half of that contributes nothing on native words (§9.2).
+have. The $10^6$-parameter learned stage added +0.91pp on top of it on the
+2026-09-08 model (+0.24pp on the retrain), and the sparse half of that
+contributed nothing on native words then ($p = 0.851$, §9.2; −0.48pp on
+the retrain, untested for significance).
 
 Reproduce with `AKSHAR_NO_RERANK=1`, `AKSHAR_GAMMA=0.0`, `AKSHAR_NO_SPARSE=1`.
 
 ## Contribution of each remaining component
 
-Full system: **81.83%** on `AK-Freq`.
+Full system: **80.98%** on `AK-Freq` (retrained 2026-09-10 model;
+the 2026-09-08 model measured 81.83% — the rows below are re-measured
+on the current model via `make ablate`):
 
 | Component removed | top-1 | $\Delta$ |
 | :--- | ---: | ---: |
-| whole rerank stage | 75.38% | **−6.45** |
-| trigram LM (bigram only) | 77.94% | **−3.89** |
-| dense + sparse (heuristic only) | 81.02% | −0.81 |
-| trie-constrained pass | 81.17% | −0.66 |
-| sparse table ($2^{20}$) | 81.93% | +0.09 |
-| corpus lexicon | 81.83% | 0.00 |
-| query variants | 81.83% | 0.00 |
+| whole rerank stage | 75.05% | **−5.93** |
+| trigram LM (bigram only) | 74.95% | **−6.03** |
+| dense + sparse (heuristic only) | 80.74% | −0.24 |
+| trie-constrained pass | 80.50% | −0.48 |
+| sparse table ($2^{20}$) | 80.50% | −0.48 |
+| corpus lexicon | 80.98% | 0.00 |
+| query variants | 80.98% | 0.00 |
+
+Previous (2026-09-08) values for reference: whole rerank −6.45, trigram
+−3.89, dense+sparse −0.81, trie pass −0.66, sparse +0.09, lexicon and
+variants 0.00. The paired McNemar tables below are the 2026-09-08
+measurements, kept as the significance record.
 
 The **language model and the frequency prior carry this system.** Everything
 learned discriminatively is marginal by comparison.

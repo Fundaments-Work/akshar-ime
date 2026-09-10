@@ -148,15 +148,9 @@ impl WasmEngine {
     /// Clear learned dictionary and persist.
     #[wasm_bindgen(js_name = resetLearning)]
     pub fn reset_learning(&mut self) -> Result<(), JsValue> {
-        // Recreate trie/context/symspell while keeping the model and reranker.
-        let model = self.inner.decoder.model.clone();
-        let reranker_weights = self.inner.reranker.weights;
-        *self = WasmEngine {
-            inner: ImeEngine::from_model(
-                model,
-                Some(crate::core::reranker::Reranker::new(reranker_weights)),
-            ),
-        };
+        // Exp 6: reset in place so the unified vocab/word-trie/sparse table
+        // survive (from_model would drop them on wasm32).
+        self.inner.reset_learned_state();
         self.save_to_storage().map_err(|e| JsValue::from_str(&e))?;
         // Also clear storage key
         if let Some(storage) = local_storage() {

@@ -1,5 +1,55 @@
 # Changelog
 
+## Unreleased — correctness fixes + pipeline repair (2026-09-10)
+
+Correctness-first audit: 14 code fixes across the engine, FFI, IBus layer,
+trainer, and CI, each logged in `docs/plans/correctness-audit-2026-09-10.md`.
+**No accuracy lost** — `make train-mid` retrain reproduces the v1.2.0 model
+within bootstrap noise (`make eval`: 80.98/45.32/29.01 vs 81.02/45.75/29.50
+on the previous artifact with identical code; pooled CIs overlap).
+
+### Fixed — engine
+- `Trie::get_top_k_suggestions` max-heap inversion returned the wrong k
+  (e.g. {3,1} instead of {3,2}); now a `Reverse` min-heap (+ regression test).
+- `ModelDecoder::build_edges` byte-slicing panicked on non-ASCII input;
+  non-ASCII queries now yield `[]` (+ regression test).
+- Reranker ignores non-finite dense weights/features, rejects negative/NaN
+  sparse scales, and falls back on NaN `AKSHAR_GAMMA` (also filtered at source).
+- Learned-state import now clears the suggestion cache; new
+  `ImeEngine::reset_learned_state()` replaces the WASM reset path that
+  silently dropped the unified vocab/word-trie/sparse table.
+
+### Fixed — FFI / IBus
+- C API: `static mut` engine → `OnceLock<Mutex<Option<…>>>`; NULL inputs
+  yield `"[]"`/no-op instead of UB; no `unwrap()` across `extern "C"`;
+  missing/non-UTF8 config dir falls back to an in-memory engine;
+  learning persists best-effort on every confirm (a kill no longer loses
+  the whole session).
+- IBus engine: NULL guards on all suggestion paths, `finalize` frees the
+  preedit string and lookup table, UTF-8-safe BackSpace, `g_utf8_strlen`
+  cursor position, bounds-checked candidate selection, checked
+  `ibus_bus_request_name`.
+
+### Fixed — training pipeline
+- `DenseStats` accumulated z-scores and the pack step overwrote the result
+  with stale constants — retrained models were silently decalibrated.
+  Now accumulates raw features and packs the fresh statistics
+  (emit 5.462±3.283, lm 25.080±6.886 on `train-mid`).
+- Full runs consumed every pair and left the dev set empty; the tail is now
+  always reserved and best-by-dev packing engaged on `train-mid`
+  (batch-2 weights over the overfit final).
+- Phase-2 vocabulary now honors the shared `holdout` split (14,465 lines).
+
+### Docs
+- Headline numbers re-measured on the retrained model (README, MANUAL §1,
+  `data/README.md`, regenerated `docs/generated/eval.json`); 2026-09-08
+  ablation/McNemar tables kept as the dated significance record.
+- `AKSHAR_FUZZY_BASE` default corrected to 600,000 (was 50,000 pre-D18).
+
+### CI
+- Now enforces the documented gate: `cargo fmt --check`, release-profile
+  clippy/tests with `-D warnings`, and the wasm target check.
+
 ## v1.2.0 — 2026-09-08
 
 Engineering-health release: hand-rolled plumbing replaced with maintained

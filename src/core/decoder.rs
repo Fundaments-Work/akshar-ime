@@ -155,6 +155,11 @@ impl ModelDecoder {
     /// Decode into decomposed candidates (emission + LM separately) for reranking.
     pub fn decode_detailed(&self, roman: &str, k: usize) -> Vec<DecodedCandidate> {
         let roman = roman.to_ascii_lowercase();
+        // Exp 2: the lattice indexes bytes; non-ASCII input can never match an
+        // ASCII chunk and previously panicked on non-char-boundary slicing.
+        if !roman.is_ascii() {
+            return vec![];
+        }
         let edges_by_pos = self.build_edges(&roman);
         let m = roman.len();
         if m == 0 {
@@ -568,12 +573,20 @@ impl ModelDecoder {
     fn build_edges(&self, roman: &str) -> Vec<Vec<Edge>> {
         let m = roman.len();
         let mut edges = vec![Vec::new(); m + 1];
-        for pos in 0..m {
+        for (pos, slot) in edges.iter_mut().enumerate().take(m) {
+            // Byte-safe: skip positions that are not char boundaries (only
+            // reachable if a non-ASCII input slipped past the caller guard).
+            if !roman.is_char_boundary(pos) {
+                continue;
+            }
             for l in 1..=MAX_CHUNK.min(m - pos) {
-                let chunk = &roman[pos..pos + l];
+                let chunk = match roman.get(pos..pos + l) {
+                    Some(c) => c,
+                    None => break,
+                };
                 if let Some(list) = self.reverse.get(chunk) {
                     for &(a, w) in list {
-                        edges[pos].push(Edge { len: l, a, w });
+                        slot.push(Edge { len: l, a, w });
                     }
                 }
             }
@@ -631,5 +644,17 @@ mod tests {
         let model = trained_model(&[("ka", "क")]);
         let dec = ModelDecoder::new(model);
         assert!(dec.decode("", 5).is_empty());
+    }
+
+    #[test]
+    fn decode_never_panics_on_non_ascii() {
+        // Exp 2 (H2): pasted Devanagari / accented / emoji input must yield
+        // [] instead of panicking on byte slicing.
+        let model = trained_model(&[("ka", "क")]);
+        let dec = ModelDecoder::new(model);
+        for q in ["café", "नमस्ते", "Zürich", "🙏", "naमस्ते"] {
+            assert!(dec.decode(q, 5).is_empty(), "query {q:?}");
+            assert!(dec.decode_detailed(q, 5).is_empty(), "query {q:?}");
+        }
     }
 }

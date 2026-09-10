@@ -1,15 +1,15 @@
 {
   "dataset": "data/aksharantar/test_devanagari.jsonl",
   "cases": 4101,
-  "correct_first_time": 0.6198488173616191,
-  "visible_top5": 0.7798098024871982,
-  "mrr": 0.6861334633829157,
-  "keystrokes_saved": 0.026748105630531205,
-  "cer_grapheme": 0.20566634928375963,
-  "avg_latency_ms": 0.8252326261887345,
+  "correct_first_time": 0.6039990246281395,
+  "visible_top5": 0.7759083150451109,
+  "mrr": 0.6756035113386993,
+  "keystrokes_saved": 0.02501957460426791,
+  "cer_grapheme": 0.21101201691911284,
+  "avg_latency_ms": 0.7936103389417216,
   "top1_ci95": [
-    0.6042367715191417,
-    0.6354547671299683
+    0.5893684467203121,
+    0.6188856376493538
   ],
   "duplicates_dropped": 16
 }

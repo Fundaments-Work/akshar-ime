@@ -11,11 +11,13 @@ orthographic syllables, a modified Kneser-Ney syllable language model, and a
 linear discriminative reranker. Inference is beam search plus dot products —
 no tensor library, no GPU.
 
-**11.37 MB desktop, 4.94 MB Brotli in the browser. 0.67 ms per query.**
+**11.37 MB desktop, 4.94 MB Brotli in the browser. 0.72 ms per query.**
 
 ## What contributes what
 
-Measured by ablation, reproducible from the shipped binary (`make ablate`):
+Measured by ablation, reproducible from the shipped binary (`make ablate`).
+Component table measured 2026-09-08; re-measured 2026-09-10 on the retrained
+model (full 80.98%, trigram −6.03pp, sparse −0.48pp, dense −0.24pp — §9):
 
 | Ranking stage | `AK-Freq` top-1 | Δ |
 | :--- | ---: | ---: |
@@ -24,26 +26,29 @@ Measured by ablation, reproducible from the shipped binary (`make ablate`):
 | + 29 dense features | 81.93% | +0.91 |
 | + 2²⁰ sparse table (shipped) | 81.83% | −0.10 |
 
-Removing the trigram language model costs **−3.89pp**; it is the single largest
+Removing the trigram language model costs **−6.03pp** on the current model
+(−3.89pp on the 2026-09-08 model); it is the single largest
 component. See the manual for per-stratum numbers with McNemar p-values.
 
 ## Measured performance
 
 Held-out AI4Bharat Aksharantar test split (4,101 cases), measured
-2026-09-06 on `data/akshar.model` at default settings and re-verified
-2026-09-08 after the dependency migration (`clap`, `rand_chacha`,
-`unicode-normalization`, `fst`, `smallvec`) — all values below reproduced
-identically (`make eval`, `make eval-full`, `make ablate`).
+2026-09-10 on the retrained `data/akshar.model` (`make train-mid`
+with the corrected pipeline: raw dense statistics, reserved dev set,
+holdout-filtered vocabulary) at default settings
+(`make eval`, `make eval-full`, `make ablate`).
+The 2026-09-08 model measured 81.83/47.79/31.21 on the same harness;
+the retrain reproduces it within bootstrap noise (pooled CIs overlap).
 
 | Split | n | top-1 | top-5 |
 | :--- | ---: | ---: | ---: |
-| `AK-Freq` (native words) | 2,108 | **81.83%** | 92.22% |
-| `AK-NEI` (named entities) | 1,176 | 47.79% | 69.81% |
-| `AK-NEF` (named entities) | 817 | 31.21% | 53.00% |
-| All cases | 4,101 | 61.98% | 77.98% |
+| `AK-Freq` (native words) | 2,108 | **80.98%** | 91.84% |
+| `AK-NEI` (named entities) | 1,176 | 45.32% | 70.15% |
+| `AK-NEF` (named entities) | 817 | 29.01% | 51.53% |
+| All cases | 4,101 | 60.40% | 77.59% |
 
-Pooled top-1 bootstrap 95% CI [60.61%, 63.36%]; MRR 0.6906; CER on `AK-Freq`
-top-1 is 3.90%. For reference, IndicXlit (an ~11M-parameter transformer) reports
+Pooled top-1 bootstrap 95% CI [58.94%, 61.89%]; MRR 0.6798; CER on `AK-Freq`
+top-1 is 3.90% (measured 2026-09-08, not re-measured on the retrain). For reference, IndicXlit (an ~11M-parameter transformer) reports
 80.25% top-1 on the native split and 52.67% on named entities *without* LM
 reranking; with its word-unigram rerank it reaches 86.6% / ~62% on Nepali
 ([Madhani et al. 2023], Table 6). Neither figure is re-measured here, and no
@@ -54,7 +59,7 @@ unreranked baseline, named-entity accuracy is well behind either way.
 | :--- | ---: | ---: |
 | Container | 11.37 MB | 8.91 MB |
 | Brotli | 6.72 MB | 4.94 MB |
-| Query latency | 0.63–0.82 ms | not re-measured since 2026-09-06 |
+| Query latency | 0.72 ms (re-measured 2026-09-10, $k=10$, full set) | not re-measured since 2026-09-06 |
 | Cold start | ~1.5 s | — |
 
 ## Documentation
@@ -113,9 +118,11 @@ model and language model always use all 3.59M pairs.
 
 - One language's data, one test set (Aksharantar).
 - Named entities are well behind the neural baseline.
-- Reranking is worth +6.45pp overall, but **87% of that is a 3-parameter
-  frequency heuristic** — the 10⁶-parameter learned stage adds +0.91pp, and its
-  sparse half adds nothing on native words (p = 0.851).
+- Reranking is worth +6.45pp overall on the 2026-09-08 model (+0.24pp dense+sparse
+  on the retrained model at full 80.98% vs heuristic-only 80.74%), but **most of
+  that has always been a 3-parameter frequency heuristic** — the 10⁶-parameter
+  learned stage added +0.91pp then, and its
+  sparse half adds nothing on native words (p = 0.851, measured 2026-09-08).
 - 5x more reranker training data was tested and changed nothing; the cause is
   that `W_DENSE` has never been refit by this pipeline (manual §12.3).
 

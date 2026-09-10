@@ -6,6 +6,7 @@
 
 use akshar_ime::core::decoder::{DecoderConfig, ModelDecoder};
 use akshar_ime::core::em_trainer::{Trainer, TrainerConfig};
+use akshar_ime::core::holdout::{is_holdout, DEFAULT_HOLDOUT_DENOM};
 use akshar_ime::core::reranker::{
     extract_dense_features, extract_sparse_features, rank_candidates, FreqRanks, DENSE_DIM,
     HASH_SIZE,
@@ -327,13 +328,25 @@ fn main() -> Result<()> {
         if tp.exists() {
             println!("Reading running text from {} ...", tp.display());
             let tf = File::open(tp).context("open text file")?;
+            let mut skipped_holdout = 0usize;
             for line in BufReader::new(tf).lines().map_while(Result::ok) {
+                // Exp 5: honor the shared holdout split so sentence-eval words
+                // never leak into vocab/WordTrie/freq priors. Pass
+                // --holdout-denom 0 to evaluate_sentences for the old behavior.
+                if is_holdout(&line, DEFAULT_HOLDOUT_DENOM) {
+                    skipped_holdout += 1;
+                    continue;
+                }
                 for token in line.split_whitespace() {
                     if let Some(clean) = clean_devanagari_token(token) {
                         *vocab_freq.entry(clean).or_insert(0) += 1;
                     }
                 }
             }
+            println!(
+                "Skipped {} held-out lines (1-in-{} split).",
+                skipped_holdout, DEFAULT_HOLDOUT_DENOM
+            );
         }
     }
 
@@ -361,17 +374,23 @@ fn main() -> Result<()> {
 
     let word_trie = WordTrie::from_freq_map(&vocab_freq, &|a| translit_model.akshara_id(a), 1);
 
+    // Held-out dev size; defined up front so the full run can reserve it.
+    const DEV_SIZE: usize = 4_000;
     let num_train_pairs = if smoke {
         500
     } else if reranker_pairs == 0 {
-        raw_pairs.len()
+        // Exp 5: full run previously consumed every pair AND left dev empty,
+        // losing its overfit guard. Reserve the tail as dev (mirrors partial
+        // runs, which use raw_pairs[len-DEV..]).
+        if raw_pairs.len() > DEV_SIZE {
+            raw_pairs.len() - DEV_SIZE
+        } else {
+            raw_pairs.len()
+        }
     } else {
         raw_pairs.len().min(reranker_pairs)
     };
-    println!(
-        "Pre-decoding candidates for {} training pairs...",
-        num_train_pairs
-    );
+    // (actual count printed after dev reservation below)
 
     struct RerankItem {
         target_idx: usize,
@@ -407,12 +426,22 @@ fn main() -> Result<()> {
     // which cannot distinguish "learning" from "memorising 1M sparse slots":
     // the table has ~1e6 parameters and no regularisation, so overfitting is
     // the default failure and it was previously invisible.
-    const DEV_SIZE: usize = 4_000;
-    let dev_pairs: Vec<(String, String)> = if raw_pairs.len() > num_train_pairs + DEV_SIZE {
-        raw_pairs[raw_pairs.len() - DEV_SIZE..].to_vec()
+    // Exp 5: the tail is ALWAYS reserved (except smoke / tiny corpora), so the
+    // training slice below can never include dev pairs — previously the full
+    // run trained on all pairs and evaluated on none.
+    let mut num_train_pairs = num_train_pairs;
+    let dev_pairs: Vec<(String, String)> = if !smoke && raw_pairs.len() > DEV_SIZE {
+        let tail = raw_pairs[raw_pairs.len() - DEV_SIZE..].to_vec();
+        num_train_pairs = num_train_pairs.min(raw_pairs.len() - DEV_SIZE);
+        tail
     } else {
         Vec::new()
     };
+    println!(
+        "Pre-decoding candidates for {} training pairs (dev reserved: {})...",
+        num_train_pairs,
+        dev_pairs.len()
+    );
 
     let dev_items: Vec<RerankItem> = if dev_pairs.is_empty() {
         Vec::new()
@@ -563,6 +592,10 @@ fn main() -> Result<()> {
                                 &vocab_freq,
                                 &ranks,
                             );
+                            // Exp 5: accumulate RAW features so finish() yields
+                            // the true distribution; z-scores (mean~0/std~1)
+                            // would describe the old constants, not the data.
+                            dense_stats.push(&raw);
                             let mut z = [0.0f64; DENSE_DIM];
                             for k in 0..DENSE_DIM {
                                 let sd = STD_DENSE[k];
@@ -575,9 +608,6 @@ fn main() -> Result<()> {
                             z
                         })
                         .collect();
-                    for feats in &dense_feats {
-                        dense_stats.push(feats);
-                    }
                     samples.push(RerankItem {
                         target_idx,
                         dense_feats,
@@ -698,6 +728,8 @@ fn main() -> Result<()> {
                             &vocab_freq,
                             &ranks,
                         );
+                        // Exp 5: raw distribution, not z-scores (see chunked path).
+                        dense_stats.push(&raw);
                         let mut z = [0.0f64; DENSE_DIM];
                         for k in 0..DENSE_DIM {
                             let sd = STD_DENSE[k];
@@ -710,9 +742,6 @@ fn main() -> Result<()> {
                         z
                     })
                     .collect();
-                for feats in &dense_feats {
-                    dense_stats.push(feats);
-                }
                 samples.push(RerankItem {
                     target_idx,
                     dense_feats,
@@ -949,8 +978,10 @@ fn main() -> Result<()> {
         1.0 / f64::from(sparse_scale),
         vocab_freq,
     );
-    unified.dense_mean = MEAN_DENSE.to_vec();
-    unified.dense_std = STD_DENSE.to_vec();
+    // Exp 5: pack the freshly computed statistics. Packing the compiled-in
+    // constants here silently kept every retrained model decalibrated.
+    unified.dense_mean = dense_mean;
+    unified.dense_std = dense_std;
     unified.dense_weights = dense_weights;
     unified
         .save(&out_path)

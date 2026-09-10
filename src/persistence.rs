@@ -29,6 +29,8 @@ impl SerializableState {
         engine.context_model = self.context_model;
         engine.symspell = self.symspell;
         engine.transliteration_model = self.transliteration_model;
+        // Exp 6: ranked lists cached under the old trie must not survive import.
+        engine.clear_suggestion_cache();
     }
     pub fn to_bytes(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         Ok(bincode::serialize(self)?)

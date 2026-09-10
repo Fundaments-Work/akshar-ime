@@ -485,14 +485,26 @@ pub fn rerank_with_norm(
         let w_dense: &[f64] = custom_dense_weights.unwrap_or(&W_DENSE);
         for k in 0..DENSE_DIM {
             let wk = w_dense.get(k).copied().unwrap_or(W_DENSE[k]);
-            s += wk * norm.z(k, dense[k]);
+            // Exp 6: a NaN weight or feature must not poison the whole list.
+            if wk.is_finite() {
+                let z = norm.z(k, dense[k]);
+                if z.is_finite() {
+                    s += wk * z;
+                }
+            }
         }
         for &h in sparse
             .iter()
             .filter(|_| !crate::core::ablation::no_sparse())
         {
             let (b, scale) = match custom_sparse_table {
-                Some(t) if h < t.len() => (t[h], custom_sparse_scale.unwrap_or(SPARSE_SCALE)),
+                Some(t) if h < t.len() => (
+                    t[h],
+                    // Exp 6: a negative/NaN scale would flip or poison scores.
+                    custom_sparse_scale
+                        .filter(|s| s.is_finite() && *s >= 0.0)
+                        .unwrap_or(SPARSE_SCALE),
+                ),
                 // SPARSE_TABLE is empty on a build with no legacy
                 // data/reranker_weights_sparse.bin (see build.rs); index 0
                 // there instead of panicking -- graceful degradation to "no
@@ -533,7 +545,11 @@ pub fn rerank_with_norm(
         }
     }
 
-    let gamma = crate::core::ablation::gamma().unwrap_or(GAMMA);
+    // Exp 6: NaN gamma (e.g. AKSHAR_GAMMA=NaN) fails every comparison and
+    // would poison the blend. Fall back to compiled GAMMA unless finite.
+    let gamma = crate::core::ablation::gamma()
+        .filter(|g| g.is_finite())
+        .unwrap_or(GAMMA);
     if gamma >= 1.0 {
         let mut blended: Vec<(String, f64)> = order
             .iter()

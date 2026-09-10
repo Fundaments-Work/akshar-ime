@@ -1,6 +1,7 @@
 // File: src/core/trie.rs
 use crate::core::types::{WordId, WordMetadata};
 use serde::{Deserialize, Serialize};
+use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -128,29 +129,39 @@ impl Trie {
             }
         }
 
-        let mut heap = BinaryHeap::with_capacity(k + 1);
+        // Min-heap via Reverse so peek() is the kth-largest (smallest kept).
+        // A plain max-heap here kept the wrong k (e.g. {3,1} instead of {3,2}).
+        let mut heap: BinaryHeap<Reverse<(u64, WordId)>> = BinaryHeap::with_capacity(k + 1);
         self.dfs_pruning_search(node_idx, k, &mut heap);
 
-        heap.into_iter().map(|(freq, id)| (id, freq)).collect()
+        heap.into_iter().map(|r| (r.0 .1, r.0 .0)).collect()
     }
 
-    fn dfs_pruning_search(&self, node_idx: usize, k: usize, heap: &mut BinaryHeap<(u64, WordId)>) {
+    fn dfs_pruning_search(
+        &self,
+        node_idx: usize,
+        k: usize,
+        heap: &mut BinaryHeap<Reverse<(u64, WordId)>>,
+    ) {
+        if k == 0 {
+            return;
+        }
         let node = &self.nodes[node_idx];
 
         if let Some(id) = node.word_id {
             let freq = self.metadata_store[id].frequency;
             if freq > 0 {
                 if heap.len() < k {
-                    heap.push((freq, id));
-                } else if freq > heap.peek().unwrap().0 {
+                    heap.push(Reverse((freq, id)));
+                } else if freq > heap.peek().unwrap().0 .0 {
                     heap.pop();
-                    heap.push((freq, id));
+                    heap.push(Reverse((freq, id)));
                 }
             }
         }
 
         let min_freq_in_heap = if heap.len() == k {
-            heap.peek().unwrap().0
+            heap.peek().unwrap().0 .0
         } else {
             0
         };
@@ -160,5 +171,40 @@ impl Trie {
                 self.dfs_pruning_search(child_idx, k, heap);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn trie_with_freqs(freqs: &[u64]) -> Trie {
+        let mut t = Trie::new();
+        for (i, &f) in freqs.iter().enumerate() {
+            let dev = format!("w{i}");
+            let id = t.get_or_create_metadata(&dev);
+            t.metadata_store[id].frequency = f;
+            t.insert(&format!("k{i}"), id, f);
+        }
+        t
+    }
+
+    #[test]
+    fn top_k_returns_largest_not_smallest() {
+        // Exp 1 (H1): freqs 1,2,3 k=2 must yield {3,2}, not {3,1}.
+        let t = trie_with_freqs(&[1, 2, 3]);
+        let mut got: Vec<u64> = t
+            .get_top_k_suggestions("k", 2)
+            .into_iter()
+            .map(|(_, f)| f)
+            .collect();
+        got.sort_unstable();
+        assert_eq!(got, vec![2, 3]);
+    }
+
+    #[test]
+    fn top_k_k_zero_returns_empty() {
+        let t = trie_with_freqs(&[5]);
+        assert!(t.get_top_k_suggestions("k", 0).is_empty());
     }
 }

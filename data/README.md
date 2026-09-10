@@ -142,10 +142,13 @@ Then re-apply the cleaning rule set in this file.
   accuracy points — vocabulary merges are explicit or they don't happen.
 - **There is no backup directory.** `data/` is gitignored and local; deletions
   are final. Keep snapshots outside the repo if you need them.
-- Verified result of the current chain: **81.83% native top-1, 92.22% top-5** (`AK-Freq`,
+- Verified result of the current chain: **80.98% native top-1, 91.84% top-5** (`AK-Freq`,
   desktop profile) through the
   full engine (canonical discriminative reranker + candidate union + pruned syllable lattice).
-  Re-verified 2026-09-08 with `make eval` after the dependency migration; values unchanged.
+  Re-measured 2026-09-10 with `make eval` after the pipeline correctness fixes
+  (`train-mid` retrain: raw dense statistics, reserved dev set, holdout-filtered
+  vocabulary); pooled top-1 60.40% [58.94%, 61.89%], within noise of the
+  2026-09-08 model (81.83% / 92.22%, pooled 61.98% [60.61%, 63.36%]).
 ```
 
 (End of file - total 136 lines)

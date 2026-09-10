@@ -5,82 +5,115 @@ use std::ffi::c_char;
 use std::ffi::{CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
-use std::ptr;
+use std::sync::{Mutex, OnceLock};
 
-static mut IME_ENGINE: *mut ImeEngine = ptr::null_mut();
+// Exp 3: the old `static mut *mut ImeEngine` was a data race on concurrent
+// read (get_suggestions) + write (confirm_word). A process-wide locked
+// singleton is still single-instance for IBus but sound.
+static IME_ENGINE: OnceLock<Mutex<Option<ImeEngine>>> = OnceLock::new();
 
-fn get_dictionary_path() -> PathBuf {
-    // NOTE: Changed to use dirs::config_dir() for better cross-platform support
-    let mut path = dirs::config_dir().expect("Could not find a valid config directory");
+fn engine_cell() -> &'static Mutex<Option<ImeEngine>> {
+    IME_ENGINE.get_or_init(|| Mutex::new(None))
+}
+
+// Exp 3 / P0-6: `dirs::config_dir()` can be absent and the path can be
+// non-UTF8. Return None instead of panicking or collapsing to "".
+fn get_dictionary_path() -> Option<PathBuf> {
+    let mut path = dirs::config_dir()?;
     path.push("akshar-devanagari");
     path.push("user_dictionary.bin");
-    path
+    Some(path)
 }
 
 #[no_mangle]
 pub extern "C" fn akshar_ime_engine_init() {
-    let result = catch_unwind(|| unsafe {
-        if !IME_ENGINE.is_null() {
+    let result = catch_unwind(|| {
+        let cell = engine_cell();
+        let Ok(mut guard) = cell.lock() else {
+            return;
+        };
+        if guard.is_some() {
             return;
         }
-        let dict_path = get_dictionary_path();
-        if let Some(parent) = dict_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let engine = ImeEngine::from_file_or_new(dict_path.to_str().unwrap_or(""));
-        IME_ENGINE = Box::into_raw(Box::new(engine));
+        let engine = match get_dictionary_path() {
+            Some(dict_path) => {
+                if let Some(parent) = dict_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                // Non-UTF8 paths: fall back to in-memory engine rather than
+                // persisting to "" (which always failed silently later).
+                match dict_path.to_str() {
+                    Some(s) => ImeEngine::from_file_or_new(s),
+                    None => {
+                        eprintln!("[akshar] non-UTF8 config path; using in-memory engine");
+                        ImeEngine::new()
+                    }
+                }
+            }
+            None => {
+                eprintln!("[akshar] no config dir; using in-memory engine");
+                ImeEngine::new()
+            }
+        };
+        *guard = Some(engine);
     });
     if result.is_err() {
         eprintln!("[Rust FATAL] A panic occurred during IME engine initialization.");
-        unsafe {
-            IME_ENGINE = ptr::null_mut();
-        }
     }
 }
 
 #[no_mangle]
 pub extern "C" fn akshar_ime_engine_destroy() {
-    unsafe {
-        if IME_ENGINE.is_null() {
+    let _ = catch_unwind(|| {
+        let cell = engine_cell();
+        let Ok(mut guard) = cell.lock() else {
             return;
+        };
+        if let Some(engine) = guard.take() {
+            // Best-effort persist; log instead of silently discarding.
+            if let Err(e) = engine.save_dictionary() {
+                eprintln!("[akshar] save_dictionary failed on destroy: {e}");
+            }
         }
-        let engine = Box::from_raw(IME_ENGINE);
-        let _ = engine.save_dictionary();
-        IME_ENGINE = ptr::null_mut();
-    }
-}
-
-unsafe fn get_engine_mut<'a>() -> Option<&'a mut ImeEngine> {
-    IME_ENGINE.as_mut()
-}
-unsafe fn get_engine<'a>() -> Option<&'a ImeEngine> {
-    IME_ENGINE.as_ref()
+    });
 }
 
 /// Returns JSON-encoded Devanagari suggestions for the given roman prefix.
 ///
 /// # Safety
 ///
-/// `prefix` must be a valid NUL-terminated UTF-8 C string. The returned
-/// pointer must be released with [`akshar_ime_free_string`].
+/// `prefix` must be a valid NUL-terminated UTF-8 C string, or NULL (which
+/// yields `"[]"`). The returned pointer must be released with
+/// [`akshar_ime_free_string`].
 #[no_mangle]
 pub unsafe extern "C" fn akshar_ime_get_suggestions(prefix: *const c_char) -> *mut c_char {
-    let c_str = unsafe { CStr::from_ptr(prefix) };
-    let roman_prefix = c_str.to_str().unwrap_or("");
+    if prefix.is_null() {
+        return CString::new("[]")
+            .unwrap_or_else(|_| CString::new("").unwrap())
+            .into_raw();
+    }
+    let roman_prefix = unsafe { CStr::from_ptr(prefix) }
+        .to_str()
+        .unwrap_or("")
+        .to_string();
     let result = catch_unwind(AssertUnwindSafe(|| {
-        unsafe {
-            if let Some(engine) = get_engine() {
-                let suggestions = engine.get_suggestions(roman_prefix, 8);
-                let json_suggestions: Vec<String> =
-                    suggestions.into_iter().map(|(s, _)| s).collect();
-                return serde_json::to_string(&json_suggestions)
-                    .unwrap_or_else(|_| "[]".to_string());
-            }
+        let cell = engine_cell();
+        let Ok(guard) = cell.lock() else {
+            return "[]".to_string();
+        };
+        if let Some(engine) = guard.as_ref() {
+            let suggestions = engine.get_suggestions(&roman_prefix, 8);
+            let json_suggestions: Vec<String> = suggestions.into_iter().map(|(s, _)| s).collect();
+            return serde_json::to_string(&json_suggestions).unwrap_or_else(|_| "[]".to_string());
         }
         "[]".to_string()
     }));
     let json_string = result.unwrap_or_else(|_| "[]".to_string());
-    CString::new(json_string).unwrap().into_raw()
+    // `json_string` never contains NUL (serde_json escapes it), but stay
+    // infallible: never `unwrap()` across an `extern "C"` boundary.
+    CString::new(json_string)
+        .unwrap_or_else(|_| CString::new("[]").unwrap())
+        .into_raw()
 }
 
 /// Records a confirmed roman → Devanagari pair so the engine learns it.
@@ -88,18 +121,34 @@ pub unsafe extern "C" fn akshar_ime_get_suggestions(prefix: *const c_char) -> *m
 /// # Safety
 ///
 /// `roman` and `devanagari` must each be a valid NUL-terminated UTF-8 C
-/// string, or NULL (which is treated as an empty string).
+/// string, or NULL (which is treated as an empty string and ignored).
 #[no_mangle]
 pub unsafe extern "C" fn akshar_ime_confirm_word(roman: *const c_char, devanagari: *const c_char) {
+    if roman.is_null() || devanagari.is_null() {
+        return;
+    }
     let roman_str = unsafe { CStr::from_ptr(roman) }.to_str().unwrap_or("");
     let devanagari_str = unsafe { CStr::from_ptr(devanagari) }.to_str().unwrap_or("");
-    if !roman_str.is_empty() && !devanagari_str.is_empty() {
-        let _ = catch_unwind(AssertUnwindSafe(|| unsafe {
-            if let Some(engine) = get_engine_mut() {
-                engine.user_confirms(roman_str, devanagari_str);
-            }
-        }));
+    if roman_str.is_empty() || devanagari_str.is_empty() {
+        return;
     }
+    let roman_owned = roman_str.to_string();
+    let dev_owned = devanagari_str.to_string();
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        let cell = engine_cell();
+        let Ok(mut guard) = cell.lock() else {
+            return;
+        };
+        if let Some(engine) = guard.as_mut() {
+            engine.user_confirms(&roman_owned, &dev_owned);
+            // Exp 3/P0-4: previously learning lived only in RAM until
+            // destroy, so a kill/crash lost the whole session. Persist
+            // best-effort on every confirm (commit-frequency, not keystroke).
+            if let Err(e) = engine.save_dictionary() {
+                eprintln!("[akshar] save_dictionary failed on confirm: {e}");
+            }
+        }
+    }));
 }
 
 /// Frees a string previously returned by [`akshar_ime_get_suggestions`].

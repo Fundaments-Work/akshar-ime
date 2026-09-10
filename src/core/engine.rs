@@ -369,6 +369,11 @@ impl ImeEngine {
         Ok(())
     }
 
+    /// Drop cached suggestion lists (called on learning / state import).
+    pub fn clear_suggestion_cache(&self) {
+        self.suggestion_cache.borrow_mut().clear();
+    }
+
     /// Entry point for every runtime (IBus C layer, WASM): applies the pure
     /// mappings (ASCII digits → Devanagari digits, trailing '.' → purnabiram)
     /// before the roman goes through the statistical model.
@@ -635,6 +640,20 @@ impl ImeEngine {
             &mut self.transliteration_model,
             &confirmation,
         );
+    }
+
+    /// Clear learned state in place, keeping model + reranker + vocab intact.
+    ///
+    /// Exp 6: the WASM `resetLearning` previously rebuilt via `from_model`,
+    /// which drops the unified container's vocab/word-trie/sparse table (and
+    /// returns `None` for reranker data on wasm32). Resetting in place keeps
+    /// the decoder exactly as loaded.
+    pub fn reset_learned_state(&mut self) {
+        self.trie = Trie::new();
+        self.context_model = ContextModel::new(CONTEXT_WINDOW_SIZE);
+        self.symspell = SymSpell::new(MAX_EDIT_DISTANCE);
+        self.transliteration_model = TransliterationModel::new();
+        self.suggestion_cache.borrow_mut().clear();
     }
 
     fn min_roman_distance(

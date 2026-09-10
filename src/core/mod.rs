@@ -34,7 +34,7 @@ pub mod wordtrie;
 /// | `AKSHAR_CACHE_SIZE` | suggestion-cache size (default 256) |
 /// | `AKSHAR_DATA_DIR` | model directory override |
 /// | `AKSHAR_USER_TRIE_BASE` | learned-word base score (default 900000) |
-/// | `AKSHAR_FUZZY_BASE` | fuzzy-match base score (default 50000) |
+/// | `AKSHAR_FUZZY_BASE` | fuzzy-match base score (default 600000) |
 /// | `AKSHAR_KN_FIXED_DISCOUNT` | single-discount LM ablation |
 pub mod ablation {
     use std::sync::OnceLock;
@@ -73,6 +73,8 @@ pub mod ablation {
     cached_flag!(no_variants, "AKSHAR_NO_VARIANTS");
 
     /// Dense/heuristic blend override; `None` means use the compiled GAMMA.
+    /// Non-finite values (NaN/±inf from a bad env string) are rejected here
+    /// so callers never branch on them (NaN fails every comparison).
     pub fn gamma() -> Option<f64> {
         static V: OnceLock<Option<f64>> = OnceLock::new();
         *V.get_or_init(|| {
@@ -84,6 +86,7 @@ pub mod ablation {
             std::env::var("AKSHAR_GAMMA")
                 .ok()
                 .and_then(|v| v.parse::<f64>().ok())
+                .filter(|g| g.is_finite())
         })
     }
 }
