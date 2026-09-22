@@ -34,12 +34,14 @@ const CONTEXT_WINDOW_SIZE: usize = 3;
 const MAX_EDIT_DISTANCE: usize = 2;
 const QUERY_VARIANT_LIMIT: usize = 6;
 
-/// Decoder beam for the IME (accuracy/speed sweet spot).
+/// Decoder beam for the IME: hypotheses kept per roman position.
 ///
-/// 128 was tried 2026-09-22 (valid +26 net) but the ship-gate on test traded
-/// native -5 for entities +9 at ~2x decode cost — valid's strata mix does not
-/// transfer; reverted to 64. Override with AKSHAR_BEAM (see tune_weights.rs).
-const DECODER_BEAM: usize = 64;
+/// With the position-synchronous search (decoder.rs) 32 already matches 64
+/// and 96 on validation (hin/nep/san/mar, 2026-09-22: top-1 62.13 / 62.13 /
+/// 62.10, in-list 84.40 / 84.43 / 84.43) at a third less time; the old
+/// single mixed-length beam needed 64 and still lost long-chunk words.
+/// Override with AKSHAR_BEAM.
+const DECODER_BEAM: usize = 32;
 
 fn decoder_beam() -> usize {
     std::env::var("AKSHAR_BEAM")
@@ -59,11 +61,51 @@ fn cache_limit() -> usize {
 
 /// Scale converting a reranker log-score into the engine's higher-better u64 score.
 const FRESH_SCALE: f64 = 800_000.0;
-/// Purnabiram (।, U+0964) — mapped from a trailing '.'.
+/// Purnabiram (।, U+0964) — typed as '.'.
 const PURNABIRAM: char = '\u{0964}';
+/// Double danda (॥, U+0965) — typed as '..'.
+const DOUBLE_DANDA: char = '\u{0965}';
+
+/// Map a run of non-letters the user typed to its Devanagari form.
+///
+/// ASCII digits become Devanagari digits.  A full stop is the purnabiram and
+/// two are the double danda (`|` / `||` spell them too); an ellipsis and
+/// every other symbol (, ? ! ; : ' " - ( ) ...) is shared with Latin
+/// typography in all Devanagari languages and passes through unchanged.
+fn devanagari_literal(run: &str) -> String {
+    let mut out = String::with_capacity(run.len() * 3);
+    let mut rest = run;
+    while let Some(c) = rest.chars().next() {
+        if c.is_ascii_digit() {
+            out.push(char::from_u32('\u{0966}' as u32 + (c as u32 - '0' as u32)).unwrap_or(c));
+            rest = &rest[1..];
+            continue;
+        }
+        // Dots and bars: map by the length of the run of that one symbol.
+        if c == '.' || c == '|' {
+            let n = rest.len() - rest.trim_start_matches(c).len();
+            match (c, n) {
+                (_, 1) => out.push(PURNABIRAM),
+                (_, 2) => out.push(DOUBLE_DANDA),
+                _ => out.push_str(&rest[..n]),
+            }
+            rest = &rest[n..];
+            continue;
+        }
+        out.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    out
+}
+
 /// User-confirmed word from the learned trie.  Above any decoder score so a
 /// word the user picked before always wins.
 const DEFAULT_USER_TRIE_BASE: u64 = 900_000;
+/// Learned word whose roman only STARTS with the typed text (a completion).
+/// Below the decoder's top-1 (800,000), so it is offered but never committed
+/// by space; the frequency bonus is capped to keep it inside its band.
+const COMPLETION_BASE: u64 = 500_000;
+const COMPLETION_FREQ_CAP: u64 = 99_999;
 /// Fuzzy (edit-distance) match over user-learned roman variants (D18 fix).
 /// Calibrated to sit below the decoder's exact top-1 (800,000) so exact decodes
 /// are never hijacked, but well above the decoder tail (~250,000) so a typo
@@ -113,6 +155,17 @@ pub struct ImeEngine {
     pub dense_std: Vec<f64>,
     /// Jointly-trained dense reranker weights (v6+); empty means "use compiled-in W_DENSE".
     pub dense_weights: Vec<f64>,
+    /// Languages the model's ranking is conditioned on (v7+, ISO 639-3) and
+    /// their dense weight offsets; empty for language-blind models.
+    langs: Vec<String>,
+    dense_lang_weights: Vec<Vec<f64>>,
+    /// The language the user is typing, as an index into `langs`; `None`
+    /// ranks language-blind (shared weights only).
+    language: Option<usize>,
+    /// Calibrated heuristic/learned blend weights (v7): language-blind and
+    /// per language; `None` / empty fall back to the compiled default.
+    gamma_auto: Option<f64>,
+    gamma_lang: Vec<f64>,
     /// W3: Candidate Union word trie over vocabulary.
     word_trie: Option<crate::core::wordtrie::WordTrie>,
     pub trie: Trie,
@@ -120,6 +173,9 @@ pub struct ImeEngine {
     pub symspell: SymSpell,
     pub(crate) transliteration_model: TransliterationModel,
     learning_engine: LearningEngine,
+    // Read only by the native save path; wasm32 persists via localStorage, so
+    // the field is dead there (and clippy -D warnings fails check-wasm).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     dictionary_path: Option<String>,
     pub sparse_table: Option<Vec<i8>>,
     pub sparse_scale: f64,
@@ -167,6 +223,11 @@ impl ImeEngine {
             dense_mean: Vec::new(),
             dense_std: Vec::new(),
             dense_weights: Vec::new(),
+            langs: Vec::new(),
+            dense_lang_weights: Vec::new(),
+            language: None,
+            gamma_auto: None,
+            gamma_lang: Vec::new(),
             word_trie,
             trie: Trie::new(),
             context_model: ContextModel::new(CONTEXT_WINDOW_SIZE),
@@ -192,6 +253,9 @@ impl ImeEngine {
         // Jointly-trained dense weights travel with the model from v6 on; older
         // containers leave this empty and the reranker falls back to W_DENSE.
         let dense_weights = std::mem::take(&mut unified.dense_weights);
+        // Language-conditioned ranking travels with the model from v7 on.
+        let langs = std::mem::take(&mut unified.langs);
+        let dense_lang_weights = std::mem::take(&mut unified.dense_lang_weights);
         let decoder = ModelDecoder::with_config(
             unified.translit,
             DecoderConfig {
@@ -217,6 +281,11 @@ impl ImeEngine {
             dense_mean,
             dense_std,
             dense_weights,
+            langs,
+            dense_lang_weights,
+            language: None,
+            gamma_auto: unified.gamma_auto,
+            gamma_lang: std::mem::take(&mut unified.gamma_lang),
             word_trie,
             trie: Trie::new(),
             context_model: ContextModel::new(CONTEXT_WINDOW_SIZE),
@@ -308,6 +377,11 @@ impl ImeEngine {
             dense_mean: Vec::new(),
             dense_std: Vec::new(),
             dense_weights: Vec::new(),
+            langs: Vec::new(),
+            dense_lang_weights: Vec::new(),
+            language: None,
+            gamma_auto: None,
+            gamma_lang: Vec::new(),
             word_trie,
             trie: Trie::new(),
             context_model: ContextModel::new(CONTEXT_WINDOW_SIZE),
@@ -394,9 +468,14 @@ impl ImeEngine {
         self.suggestion_cache.borrow_mut().clear();
     }
 
-    /// Entry point for every runtime (IBus C layer, WASM): applies the pure
-    /// mappings (ASCII digits → Devanagari digits, trailing '.' → purnabiram)
-    /// before the roman goes through the statistical model.
+    /// Entry point for every runtime (IBus C layer, WASM).
+    ///
+    /// Only ASCII letters go through the statistical model.  Everything else
+    /// the user types is a literal that keeps its place: digits become
+    /// Devanagari digits and punctuation is mapped by [`devanagari_literal`]
+    /// (`.` → `।`, `..` → `॥`, the rest unchanged).  A literal-only input
+    /// returns its mapping, never an empty list -- an empty answer for `,`
+    /// or `?` once made the IBus front end swallow the keystroke.
     pub fn get_suggestions(&self, prefix: &str, count: usize) -> Vec<(String, u64)> {
         if prefix.is_empty() {
             return vec![];
@@ -409,115 +488,72 @@ impl ImeEngine {
                 return cached[..count].to_vec();
             }
         }
-
-        // Purnabiram (।): a trailing '.' asks for it on the result; a lone
-        // '.' *is* purnabiram.
-        let (base, purnabiram) = match prefix.strip_suffix('.') {
-            Some("") => return vec![(PURNABIRAM.to_string(), FRESH_SCALE as u64)],
-            Some(b) => (b, true),
-            None => (prefix, false),
-        };
-        let cache_key = prefix.to_string();
-        let finish = |mut out: Vec<(String, u64)>| {
-            if purnabiram {
-                for (s, _) in out.iter_mut() {
-                    s.push(PURNABIRAM);
-                }
-            }
+        let finish = |out: Vec<(String, u64)>| {
             // cache for next keystroke; evict when over limit
-            {
-                let mut cache = self.suggestion_cache.borrow_mut();
-                if cache.len() >= cache_limit() {
-                    cache.clear();
-                }
-                cache.insert(cache_key.clone(), out.clone());
+            let mut cache = self.suggestion_cache.borrow_mut();
+            if cache.len() >= cache_limit() {
+                cache.clear();
             }
+            cache.insert(prefix.to_string(), out.clone());
             out
         };
 
-        // Split the input into letter runs and digit runs. Digits never enter
-        // the model — they map to Devanagari digits directly.
-        let mut segments: Vec<Result<String, String>> = Vec::new(); // Ok(letters) / Err(digits)
-        for part in base.split_inclusive(|c: char| c.is_ascii_digit()) {
-            if part.is_empty() {
-                continue;
+        // Maximal runs of letters (words for the model) and of everything
+        // else (literals), in input order.
+        let mut runs: Vec<(bool, &str)> = Vec::new(); // (is_word, text)
+        let (mut start, mut current) = (0, None);
+        for (i, c) in prefix.char_indices() {
+            let is_word = c.is_ascii_alphabetic();
+            if let Some(w) = current.filter(|&w| w != is_word) {
+                runs.push((w, &prefix[start..i]));
+                start = i;
             }
-            if part.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-                let last = segments.last_mut();
-                match last {
-                    Some(Err(d)) => d.push_str(part),
-                    _ => segments.push(Err(part.to_string())),
-                }
-            } else {
-                let mut digits_end = part.len();
-                for (i, c) in part.char_indices() {
-                    if c.is_ascii_digit() {
-                        digits_end = i;
-                        break;
-                    }
-                }
-                let (letters, trailing_digits) = part.split_at(digits_end);
-                segments.push(Ok(letters.to_string()));
-                if !trailing_digits.is_empty() {
-                    segments.push(Err(trailing_digits.to_string()));
-                }
-            }
+            current = Some(is_word);
         }
-        let map_digits = |d: &str| -> String {
-            d.chars()
-                .map(|c| {
-                    if c.is_ascii_digit() {
-                        char::from_u32('\u{0966}' as u32 + c as u32 - '0' as u32).unwrap_or(c)
-                    } else {
-                        c
-                    }
-                })
-                .collect()
-        };
+        if let Some(w) = current {
+            runs.push((w, &prefix[start..]));
+        }
 
-        let letter_runs: Vec<&String> = segments.iter().filter_map(|s| s.as_ref().ok()).collect();
-        if letter_runs.is_empty() {
-            // Pure number: 123 -> १२३ (no model involved).
-            let digits = segments
-                .iter()
-                .filter_map(|s| s.as_ref().err())
-                .cloned()
-                .collect::<Vec<_>>()
-                .join("");
-            return finish(vec![(map_digits(&digits), FRESH_SCALE as u64)]);
-        }
-        if letter_runs.len() == 1 {
-            // Single word with optional leading/trailing digits: decode the
-            // word, then place the mapped digit runs at their original edges.
-            let roman = letter_runs[0].as_str();
-            let lead_digits = match segments.first() {
-                Some(Err(d)) => map_digits(d),
-                _ => String::new(),
-            };
-            let trail_digits = match segments.last() {
-                Some(Err(d)) => map_digits(d),
-                _ => String::new(),
-            };
-            let mut out = self.suggestions_for_roman(roman, count);
-            for (s, _) in out.iter_mut() {
-                *s = format!("{lead_digits}{s}{trail_digits}");
+        let words = runs.iter().filter(|(w, _)| *w).count();
+        match words {
+            // Pure literal: "123" -> "१२३", "." -> "।", "?" -> "?".
+            0 => {
+                let text: String = runs.iter().map(|(_, t)| devanagari_literal(t)).collect();
+                finish(vec![(text, FRESH_SCALE as u64)])
             }
-            return finish(out);
-        }
-        // Digits between words ("ka2024ma"): decode each letter run to its
-        // top choice and interleave the mapped digits — one combined result.
-        let mut combined = String::new();
-        for seg in &segments {
-            match seg {
-                Ok(roman) => {
-                    if let Some((top, _)) = self.suggestions_for_roman(roman, 1).first() {
-                        combined.push_str(top);
+            // One word with literals at its edges ("namaste.", "(ram)", "12na"):
+            // the full ranked list, each suggestion wrapped in the literals.
+            1 => {
+                let (mut lead, mut trail, mut word) = (String::new(), String::new(), "");
+                for (is_word, t) in &runs {
+                    match (*is_word, word.is_empty()) {
+                        (true, _) => word = t,
+                        (false, true) => lead.push_str(&devanagari_literal(t)),
+                        (false, false) => trail.push_str(&devanagari_literal(t)),
                     }
                 }
-                Err(d) => combined.push_str(&map_digits(d)),
+                let mut out = self.suggestions_for_roman(word, count);
+                for (s, _) in out.iter_mut() {
+                    *s = format!("{lead}{s}{trail}");
+                }
+                finish(out)
+            }
+            // Literals between words ("ram-shyam", "ka2024ma"): each word's
+            // top choice, interleaved with the literals -- one combined result.
+            _ => {
+                let mut combined = String::new();
+                for (is_word, t) in &runs {
+                    if *is_word {
+                        if let Some((top, _)) = self.suggestions_for_roman(t, 1).first() {
+                            combined.push_str(top);
+                        }
+                    } else {
+                        combined.push_str(&devanagari_literal(t));
+                    }
+                }
+                finish(vec![(combined, FRESH_SCALE as u64)])
             }
         }
-        finish(vec![(combined, FRESH_SCALE as u64)])
     }
 
     /// The statistical path: roman (letters only) -> ranked Devanagari words.
@@ -570,6 +606,14 @@ impl ImeEngine {
                     } else {
                         Some(&self.dense_weights)
                     },
+                    self.language.and_then(|index| {
+                        self.dense_lang_weights
+                            .get(index)
+                            .map(|dense| crate::core::reranker::LangCond { index, dense })
+                    }),
+                    self.language
+                        .and_then(|l| self.gamma_lang.get(l).copied())
+                        .or(self.gamma_auto),
                 ),
                 None => self.reranker.rerank(roman, cands),
             };
@@ -614,13 +658,20 @@ impl ImeEngine {
         for qv in &query_variants {
             let roman = qv.roman.as_str();
 
-            // 3. User-learned dictionary (trie).
+            // 3. User-learned dictionary (trie).  The trie search is by roman
+            //    PREFIX: a word confirmed for exactly this roman outranks every
+            //    other source, but a learned word this roman merely begins is a
+            //    completion -- listed, never the default commit.  (Ranking
+            //    completions in the exact band made "na" + space commit नमस्ते
+            //    once "namaste" had been typed.)
             for (word_id, freq) in self.trie.get_top_k_suggestions(roman, count * 3) {
                 if let Some(meta) = self.trie.metadata_store.get(word_id) {
-                    add(
-                        meta.devanagari.clone(),
-                        user_trie_base().saturating_add(freq),
-                    );
+                    let score = if meta.variants.contains(roman) {
+                        user_trie_base().saturating_add(freq)
+                    } else {
+                        COMPLETION_BASE + freq.min(COMPLETION_FREQ_CAP)
+                    };
+                    add(meta.devanagari.clone(), score);
                 }
             }
 
@@ -656,9 +707,54 @@ impl ImeEngine {
         }
 
         let mut out: Vec<(String, u64)> = candidates.into_iter().collect();
-        out.sort_by_key(|&(_, score)| std::cmp::Reverse(score));
+        // Ties on the u64 score are broken by the string: `candidates` is a
+        // randomly-seeded HashMap, so without this the same query could list
+        // equally-scored words in a different order in every process.
+        out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         out.truncate(count);
         out
+    }
+
+    /// Choose the language the user is typing (ISO 639-3 such as `"hin"`,
+    /// or the ISO 639-1 alias `"hi"`); `None`, `""` or `"auto"` ranks
+    /// language-blind.  Returns false -- and falls back to language-blind --
+    /// for a language this model was not conditioned on.
+    pub fn set_language(&mut self, code: Option<&str>) -> bool {
+        let code = code
+            .map(str::trim)
+            .filter(|c| !c.is_empty() && *c != "auto");
+        let wanted = code.map(|c| match c {
+            "hi" => "hin",
+            "mr" => "mar",
+            "ne" => "nep",
+            "sa" => "san",
+            other => other,
+        });
+        let index = wanted.and_then(|w| self.langs.iter().position(|l| l == w));
+        if index != self.language {
+            self.language = index;
+            self.suggestion_cache.borrow_mut().clear();
+        }
+        code.is_none() || index.is_some()
+    }
+
+    /// The language suggestions are ranked for, if one is set.
+    pub fn language(&self) -> Option<&str> {
+        self.language.map(|i| self.langs[i].as_str())
+    }
+
+    /// Languages this model can condition its ranking on (ISO 639-3).
+    pub fn languages(&self) -> &[String] {
+        &self.langs
+    }
+
+    /// Override the heuristic/learned blend weights (language-blind, and per
+    /// language in `languages()` order; empty = use `auto`).  Used by the
+    /// calibration tool; clears the suggestion cache.
+    pub fn set_blend(&mut self, auto: Option<f64>, per_language: Vec<f64>) {
+        self.gamma_auto = auto;
+        self.gamma_lang = per_language;
+        self.suggestion_cache.borrow_mut().clear();
     }
 
     /// Set the preceding-word context without learning the word.
@@ -995,6 +1091,11 @@ mod tests {
             dense_mean: Vec::new(),
             dense_std: Vec::new(),
             dense_weights: Vec::new(),
+            langs: Vec::new(),
+            dense_lang_weights: Vec::new(),
+            language: None,
+            gamma_auto: None,
+            gamma_lang: Vec::new(),
             word_trie: None,
             trie: Trie::new(),
             context_model: ContextModel::new(3),
@@ -1028,6 +1129,24 @@ mod tests {
             .position(|(d, _)| d == "नमस्ते")
             .expect("नमस्ते should be suggested after learning");
         assert_eq!(pos, 0, "learned word should rank first");
+    }
+
+    #[test]
+    fn a_learned_word_does_not_hijack_its_prefixes() {
+        let mut engine = engine_with(tiny_decoder().model);
+        for _ in 0..5 {
+            engine.user_confirms("namaste", "नमस्ते");
+        }
+        // "na" is its own word: the decoder's answer stays first ...
+        let na = engine.get_suggestions("na", 8);
+        assert_ne!(na[0].0, "नमस्ते", "prefix hijacked: {na:?}");
+        // ... while the learned word is still offered as a completion ...
+        assert!(
+            na.iter().any(|(d, _)| d == "नमस्ते"),
+            "completion missing: {na:?}"
+        );
+        // ... and wins outright for the exact roman it was learned from.
+        assert_eq!(engine.get_suggestions("namaste", 8)[0].0, "नमस्ते");
     }
 
     #[test]
@@ -1098,6 +1217,59 @@ mod tests {
         let out = engine.get_suggestions("12na", 8);
         assert!(!out.is_empty());
         assert!(out.iter().all(|(d, _)| d.starts_with("१२")));
+    }
+
+    #[test]
+    fn punctuation_alone_is_never_swallowed() {
+        let engine = engine_with(tiny_decoder().model);
+        for (typed, want) in [
+            (",", ","),
+            ("?", "?"),
+            ("!", "!"),
+            ("-", "-"),
+            (".", "।"),
+            ("..", "॥"),
+            ("|", "।"),
+            ("||", "॥"),
+            ("...", "..."),
+        ] {
+            let out = engine.get_suggestions(typed, 8);
+            assert_eq!(out.len(), 1, "{typed:?}");
+            assert_eq!(out[0].0, want, "{typed:?}");
+        }
+    }
+
+    #[test]
+    fn punctuation_around_a_word_keeps_its_place() {
+        let engine = engine_with(tiny_decoder().model);
+        let plain: Vec<String> = engine
+            .get_suggestions("namaste", 8)
+            .into_iter()
+            .map(|(d, _)| d)
+            .collect();
+        for (typed, lead, trail) in [
+            ("namaste,", "", ","),
+            ("namaste?", "", "?"),
+            ("namaste..", "", "॥"),
+            ("(namaste)", "(", ")"),
+            ("\"namaste\"", "\"", "\""),
+        ] {
+            let got: Vec<String> = engine
+                .get_suggestions(typed, 8)
+                .into_iter()
+                .map(|(d, _)| d)
+                .collect();
+            let want: Vec<String> = plain.iter().map(|d| format!("{lead}{d}{trail}")).collect();
+            assert_eq!(got, want, "{typed:?}");
+        }
+    }
+
+    #[test]
+    fn punctuation_between_words_interleaves() {
+        let engine = engine_with(tiny_decoder().model);
+        let out = engine.get_suggestions("na-ma", 8);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, "न-म");
     }
 
     #[test]

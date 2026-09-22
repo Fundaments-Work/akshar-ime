@@ -111,6 +111,24 @@ impl WasmEngine {
         let _ = self.save_to_storage();
     }
 
+    /// Rank suggestions for one language: an ISO 639-3 code ("hin", "nep",
+    /// ...) or ISO 639-1 alias ("hi"); null, "" or "auto" for language-blind.
+    /// Returns false if the model does not support it (auto is used).
+    #[wasm_bindgen(js_name = setLanguage)]
+    pub fn set_language(&mut self, code: Option<String>) -> bool {
+        self.inner.set_language(code.as_deref())
+    }
+
+    /// Languages the model can rank for (ISO 639-3 codes).
+    #[wasm_bindgen(js_name = languages)]
+    pub fn languages(&self) -> Vec<JsValue> {
+        self.inner
+            .languages()
+            .iter()
+            .map(|l| JsValue::from_str(l))
+            .collect()
+    }
+
     /// Returns true if model is loaded and valid (not empty fallback).
     #[wasm_bindgen(js_name = isReady)]
     pub fn is_ready(&self) -> bool {

@@ -349,7 +349,41 @@ pub fn extract_dense_features(
     feats
 }
 
+/// Sparse feature slots of one candidate (language-blind).
 pub fn extract_sparse_features(dev: &str, roman: &str, n_ak: usize, aks: &[String]) -> Vec<usize> {
+    extract_sparse_features_lang(dev, roman, n_ak, aks, None)
+}
+
+/// Sparse feature slots, with a language-specific copy of every feature when
+/// the query's language is known: feature augmentation (Daumé III 2007,
+/// "Frustratingly Easy Domain Adaptation").  The shared copy learns what
+/// holds for all Devanagari; the tagged copy learns what one language does
+/// differently (Hindi drops a word-final schwa that Sanskrit writes, Nepali
+/// and Hindi spell the same loanword differently, ...).  With `lang = None`
+/// the slots are exactly the language-blind ones.
+pub fn extract_sparse_features_lang(
+    dev: &str,
+    roman: &str,
+    n_ak: usize,
+    aks: &[String],
+    lang: Option<usize>,
+) -> Vec<usize> {
+    let keys = sparse_keys(dev, roman, n_ak, aks);
+    let mut feats = Vec::with_capacity(keys.len() * 2);
+    for &(template, a, b) in &keys {
+        feats.push(hash_feature(template, a, b));
+        if let Some(l) = lang {
+            // Templates are small integers; the language rides above them.
+            feats.push(hash_feature(template | ((l as u32 + 1) << 8), a, b));
+        }
+    }
+    feats.sort_unstable();
+    feats.dedup();
+    feats
+}
+
+/// The lexicalised feature keys of one candidate: (template, arg1, arg2).
+fn sparse_keys(dev: &str, roman: &str, n_ak: usize, aks: &[String]) -> Vec<(u32, u32, u32)> {
     let mut feats = Vec::with_capacity(12);
     let dev_chars: Vec<char> = dev.chars().collect();
     let roman_bytes = roman.as_bytes();
@@ -357,18 +391,18 @@ pub fn extract_sparse_features(dev: &str, roman: &str, n_ak: usize, aks: &[Strin
     // 1. Length delta bucket
     let delta = (n_ak as i32) - (roman_bytes.len() as i32);
     let delta_bucket = (delta + 10).clamp(0, 20) as u32;
-    feats.push(hash_feature(1, delta_bucket, 0));
+    feats.push((1, delta_bucket, 0));
 
     // 2. Final akshara x final roman character
     if let (Some(last_ak), Some(&last_r)) = (aks.last(), roman_bytes.last()) {
         let h_ak = hash_string(last_ak);
-        feats.push(hash_feature(2, h_ak, last_r as u32));
+        feats.push((2, h_ak, last_r as u32));
     }
 
     // 3. First akshara x first roman character
     if let (Some(first_ak), Some(&first_r)) = (aks.first(), roman_bytes.first()) {
         let h_ak = hash_string(first_ak);
-        feats.push(hash_feature(3, h_ak, first_r as u32));
+        feats.push((3, h_ak, first_r as u32));
     }
 
     // 4. Matra x preceding consonant
@@ -376,7 +410,7 @@ pub fn extract_sparse_features(dev: &str, roman: &str, n_ak: usize, aks: &[Strin
         if MATRAS.contains(&dev_chars[i]) {
             let prev_c = dev_chars[i - 1] as u32;
             let matra_c = dev_chars[i] as u32;
-            feats.push(hash_feature(4, prev_c, matra_c));
+            feats.push((4, prev_c, matra_c));
         }
     }
 
@@ -384,14 +418,14 @@ pub fn extract_sparse_features(dev: &str, roman: &str, n_ak: usize, aks: &[Strin
     if let Some(suf) = get_morph_suffix(dev) {
         if let Some(&last_r) = roman_bytes.last() {
             let h_suf = hash_string(suf);
-            feats.push(hash_feature(5, h_suf, last_r as u32));
+            feats.push((5, h_suf, last_r as u32));
         }
     }
 
     // 6. Final matra x final roman character (W4)
     if let (Some(last_ch), Some(&last_r)) = (dev_chars.last(), roman_bytes.last()) {
         if MATRAS.contains(last_ch) {
-            feats.push(hash_feature(6, *last_ch as u32, last_r as u32));
+            feats.push((6, *last_ch as u32, last_r as u32));
         }
     }
 
@@ -400,12 +434,10 @@ pub fn extract_sparse_features(dev: &str, roman: &str, n_ak: usize, aks: &[Strin
         let last_ch = dev_chars[dev_chars.len() - 1];
         let prev_ch = dev_chars[dev_chars.len() - 2];
         if MATRAS.contains(&last_ch) {
-            feats.push(hash_feature(7, prev_ch as u32, last_ch as u32));
+            feats.push((7, prev_ch as u32, last_ch as u32));
         }
     }
 
-    feats.sort_unstable();
-    feats.dedup();
     feats
 }
 
@@ -577,7 +609,18 @@ pub fn rerank_with_table(
         custom_sparse_scale,
         DenseNorm::compiled_in(),
         None, // No jointly-trained dense weights: use compiled-in W_DENSE.
+        None,
+        None,
     )
+}
+
+/// Language conditioning for one query: which language the user is typing
+/// (an index into the model's `langs`) and that language's dense weight
+/// offsets.  `None` everywhere means language-blind ranking.
+#[derive(Debug, Clone, Copy)]
+pub struct LangCond<'a> {
+    pub index: usize,
+    pub dense: &'a [f64],
 }
 
 /// As `rerank_with_table`, with explicit dense-feature normalisation statistics
@@ -596,6 +639,8 @@ pub fn rerank_with_norm(
     custom_sparse_scale: Option<f64>,
     norm: DenseNorm<'_>,
     custom_dense_weights: Option<&[f64]>,
+    lang: Option<LangCond<'_>>,
+    gamma: Option<f64>,
 ) -> Vec<(String, f64)> {
     if candidates.is_empty() {
         return vec![];
@@ -635,14 +680,21 @@ pub fn rerank_with_norm(
         }
         let dense = extract_dense_features(c, i, heur[i], heur_rank[i], roman, freq, ranks);
         let aks = akshara::segment(&c.dev);
-        let sparse = extract_sparse_features(&c.dev, roman, c.akshara_count, &aks);
+        let sparse = extract_sparse_features_lang(
+            &c.dev,
+            roman,
+            c.akshara_count,
+            &aks,
+            lang.map(|l| l.index),
+        );
 
         let mut s = 0.0f64;
         // Use jointly-trained dense weights from the v6+ container when available;
         // fall back to the compiled-in W_DENSE constant for v5 and earlier.
         let w_dense: &[f64] = custom_dense_weights.unwrap_or(&W_DENSE);
         for k in 0..DENSE_DIM {
-            let wk = w_dense.get(k).copied().unwrap_or(W_DENSE[k]);
+            let wk = w_dense.get(k).copied().unwrap_or(W_DENSE[k])
+                + lang.map_or(0.0, |l| l.dense.get(k).copied().unwrap_or(0.0));
             // Exp 6: a NaN weight or feature must not poison the whole list.
             if wk.is_finite() {
                 let z = norm.z(k, dense[k]);
@@ -703,9 +755,12 @@ pub fn rerank_with_norm(
         }
     }
 
-    // Exp 6: NaN gamma (e.g. AKSHAR_GAMMA=NaN) fails every comparison and
-    // would poison the blend. Fall back to compiled GAMMA unless finite.
+    // Blend weight: the AKSHAR_GAMMA experiment override, else the model's
+    // calibrated value for this query, else the compiled default.  A NaN
+    // (e.g. AKSHAR_GAMMA=NaN) fails every comparison and would poison the
+    // blend, so only finite values count.
     let gamma = crate::core::ablation::gamma()
+        .or(gamma)
         .filter(|g| g.is_finite())
         .unwrap_or(GAMMA);
     if gamma >= 1.0 {

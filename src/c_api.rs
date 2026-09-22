@@ -151,6 +151,36 @@ pub unsafe extern "C" fn akshar_ime_confirm_word(roman: *const c_char, devanagar
     }));
 }
 
+/// Chooses the language suggestions are ranked for: an ISO 639-3 code
+/// (`"hin"`, `"nep"`, ...) or its ISO 639-1 alias (`"hi"`), or NULL / `""` /
+/// `"auto"` for language-blind ranking.  Returns 1 when the model supports
+/// the language (or auto was requested), 0 when it fell back to auto.
+///
+/// # Safety
+///
+/// `code` must be a valid NUL-terminated UTF-8 C string, or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn akshar_ime_set_language(code: *const c_char) -> i32 {
+    let code = if code.is_null() {
+        None
+    } else {
+        unsafe { CStr::from_ptr(code) }
+            .to_str()
+            .ok()
+            .map(str::to_string)
+    };
+    catch_unwind(AssertUnwindSafe(|| {
+        let Ok(mut guard) = engine_cell().lock() else {
+            return 0;
+        };
+        match guard.as_mut() {
+            Some(engine) => i32::from(engine.set_language(code.as_deref())),
+            None => 0,
+        }
+    }))
+    .unwrap_or(0)
+}
+
 /// Frees a string previously returned by [`akshar_ime_get_suggestions`].
 ///
 /// # Safety

@@ -26,11 +26,13 @@ pub const UNIFIED_MAGIC: [u8; 4] = *b"AKSH";
 ///   v4  removed word-bigram table (19.5 MB for +0.16pp — not shipped)
 ///   v5  carries the reranker's dense-feature normalisation statistics
 ///   v6  adds `dense_weights` (jointly-trained dense reranker weights, 29 elems)
+///   v7  adds the language list and per-language dense reranker weights
+///       (language-conditioned ranking; see `reranker::LangCond`)
 ///
-/// v1-v5 still load (bigrams dropped; v4 falls back to the compiled-in
-/// normalisation constants; v5 loads with empty dense_weights). v6 is what
-/// `save` writes.
-pub const UNIFIED_VERSION: u32 = 6;
+/// v1-v6 still load (bigrams dropped; v4 falls back to the compiled-in
+/// normalisation constants; v5 loads with empty dense_weights; v6 loads with
+/// no languages, i.e. language-blind ranking). v7 is what `save` writes.
+pub const UNIFIED_VERSION: u32 = 7;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct UnifiedModel {
@@ -58,6 +60,23 @@ pub struct UnifiedModel {
     /// Empty means "use the compiled-in defaults" (v1-v5 containers).
     #[serde(default)]
     pub dense_weights: Vec<f64>,
+    /// Languages the ranking was conditioned on (ISO 639-3 codes, e.g.
+    /// "hin", "nep"), indexed by `reranker::LangCond::index`.  Empty for
+    /// language-blind models (v1-v6).
+    #[serde(default)]
+    pub langs: Vec<String>,
+    /// Per-language dense weight offsets, `dense_lang_weights[l][k]`, added to
+    /// `dense_weights[k]` when the query's language is `langs[l]`.
+    #[serde(default)]
+    pub dense_lang_weights: Vec<Vec<f64>>,
+    /// Heuristic/learned blend weight calibrated on the validation split
+    /// (`calibrate_blend`) for language-blind queries; `None` = compiled GAMMA.
+    #[serde(default)]
+    pub gamma_auto: Option<f64>,
+    /// Calibrated blend weight per language (same order as `langs`); empty =
+    /// use `gamma_auto`.
+    #[serde(default)]
+    pub gamma_lang: Vec<f64>,
 }
 
 /// The v1 container layout, kept only so existing `akshar.model` files still
@@ -87,6 +106,10 @@ impl From<UnifiedModelV1> for UnifiedModel {
             dense_mean: Vec::new(),
             dense_std: Vec::new(),
             dense_weights: Vec::new(),
+            langs: Vec::new(),
+            dense_lang_weights: Vec::new(),
+            gamma_auto: None,
+            gamma_lang: Vec::new(),
         }
     }
 }
@@ -116,6 +139,10 @@ impl From<UnifiedModelV2> for UnifiedModel {
             dense_mean: Vec::new(),
             dense_std: Vec::new(),
             dense_weights: Vec::new(),
+            langs: Vec::new(),
+            dense_lang_weights: Vec::new(),
+            gamma_auto: None,
+            gamma_lang: Vec::new(),
         }
     }
 }
@@ -172,6 +199,10 @@ impl UnifiedModel {
             dense_mean: Vec::new(),
             dense_std: Vec::new(),
             dense_weights: Vec::new(),
+            langs: Vec::new(),
+            dense_lang_weights: Vec::new(),
+            gamma_auto: None,
+            gamma_lang: Vec::new(),
         }
     }
 
@@ -184,6 +215,7 @@ impl UnifiedModel {
         let version =
             peek_version(bytes).ok_or("Invalid magic header: not an Akshar unified model")?;
         let mut model: Self = match version {
+            7 => bincode::deserialize::<UnifiedModelV7>(bytes)?.try_into()?,
             6 => bincode::deserialize::<UnifiedModelV6>(bytes)?.try_into()?,
             5 => bincode::deserialize::<UnifiedModelV5>(bytes)?.try_into()?,
             4 => bincode::deserialize::<UnifiedModelV4>(bytes)?.try_into()?,
@@ -217,6 +249,10 @@ impl UnifiedModel {
                     dense_mean: Vec::new(),
                     dense_std: Vec::new(),
                     dense_weights: Vec::new(),
+                    langs: Vec::new(),
+                    dense_lang_weights: Vec::new(),
+                    gamma_auto: None,
+                    gamma_lang: Vec::new(),
                 }
             }
             2 => bincode::deserialize::<UnifiedModelV2>(bytes)?.into(),
@@ -233,12 +269,12 @@ impl UnifiedModel {
     pub fn save(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         let f = File::create(path)?;
         let mut writer = BufWriter::new(f);
-        bincode::serialize_into(&mut writer, &UnifiedModelV6::from(self))?;
+        bincode::serialize_into(&mut writer, &UnifiedModelV7::from(self))?;
         Ok(())
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        Ok(bincode::serialize(&UnifiedModelV6::from(self))?)
+        Ok(bincode::serialize(&UnifiedModelV7::from(self))?)
     }
 
     pub fn validate(&self) -> bool {
@@ -364,6 +400,10 @@ impl TryFrom<UnifiedModelV4> for UnifiedModel {
             dense_mean: Vec::new(),
             dense_std: Vec::new(),
             dense_weights: Vec::new(),
+            langs: Vec::new(),
+            dense_lang_weights: Vec::new(),
+            gamma_auto: None,
+            gamma_lang: Vec::new(),
         })
     }
 }
@@ -399,6 +439,57 @@ impl TryFrom<UnifiedModelV6> for UnifiedModel {
     }
 }
 
+// ---------------------------------------------------------------------------
+// v7: v6 fields plus language-conditioned ranking
+// ---------------------------------------------------------------------------
+
+/// The v7 layout: every v6 field, plus the languages the reranker was
+/// conditioned on and their dense weight offsets.
+#[derive(Serialize, Deserialize)]
+struct UnifiedModelV7 {
+    v6: UnifiedModelV6,
+    langs: Vec<String>,
+    dense_lang_weights: Vec<Vec<f64>>,
+    gamma_auto: Option<f64>,
+    gamma_lang: Vec<f64>,
+}
+
+impl From<&UnifiedModel> for UnifiedModelV7 {
+    fn from(m: &UnifiedModel) -> Self {
+        Self {
+            v6: UnifiedModelV6::from(m),
+            langs: m.langs.clone(),
+            dense_lang_weights: m.dense_lang_weights.clone(),
+            gamma_auto: m.gamma_auto,
+            gamma_lang: m.gamma_lang.clone(),
+        }
+    }
+}
+
+impl TryFrom<UnifiedModelV7> for UnifiedModel {
+    type Error = Box<dyn std::error::Error>;
+
+    fn try_from(v: UnifiedModelV7) -> Result<Self, Self::Error> {
+        if v.dense_lang_weights.len() != v.langs.len()
+            || !(v.gamma_lang.is_empty() || v.gamma_lang.len() == v.langs.len())
+        {
+            return Err(format!(
+                "v7 container: {} languages but {} weight rows / {} blend weights",
+                v.langs.len(),
+                v.dense_lang_weights.len(),
+                v.gamma_lang.len()
+            )
+            .into());
+        }
+        let mut m = UnifiedModel::try_from(v.v6)?;
+        m.langs = v.langs;
+        m.dense_lang_weights = v.dense_lang_weights;
+        m.gamma_auto = v.gamma_auto;
+        m.gamma_lang = v.gamma_lang;
+        Ok(m)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -419,6 +510,32 @@ mod tests {
         let mut vocab = HashMap::new();
         vocab.insert("क".to_string(), 7u32);
         UnifiedModel::new(translit, vec![1i8, -2, 3], 0.25, vocab)
+    }
+
+    #[test]
+    fn v7_round_trips_languages_and_v6_loads_language_blind() {
+        let mut m = tiny_model();
+        m.langs = vec!["hin".into(), "nep".into()];
+        m.dense_lang_weights = vec![vec![0.5; 3], vec![-0.25; 3]];
+        m.gamma_auto = Some(0.6);
+        m.gamma_lang = vec![1.0, 0.3];
+        let back = UnifiedModel::from_bytes(&m.to_bytes().unwrap()).unwrap();
+        assert_eq!(back.langs, m.langs);
+        assert_eq!(back.dense_lang_weights, m.dense_lang_weights);
+        assert_eq!(back.gamma_auto, Some(0.6));
+        assert_eq!(back.gamma_lang, vec![1.0, 0.3]);
+
+        let v6 = bincode::serialize(&UnifiedModelV6 {
+            v5: UnifiedModelV5::from(&m),
+            dense_weights: vec![1.0; 3],
+        })
+        .unwrap();
+        // The header written by the v4 part says v7; stamp v6 as a v6 writer did.
+        let mut v6 = v6;
+        v6[4..8].copy_from_slice(&6u32.to_le_bytes());
+        let old = UnifiedModel::from_bytes(&v6).unwrap();
+        assert!(old.langs.is_empty() && old.dense_lang_weights.is_empty());
+        assert_eq!(old.dense_weights, vec![1.0; 3]);
     }
 
     /// v2 bytes (as written before the compact encoding landed) must still read.
