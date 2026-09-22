@@ -13,7 +13,7 @@
 // climb as their frequency grows.
 
 use crate::core::{
-    context::ContextModel,
+    context::{ContextModel, CorpusCtx},
     decoder::{DecoderConfig, ModelDecoder},
     normalizer::expand_query_variants,
     reranker::{Reranker, NUM_FEATURES},
@@ -34,7 +34,11 @@ const CONTEXT_WINDOW_SIZE: usize = 3;
 const MAX_EDIT_DISTANCE: usize = 2;
 const QUERY_VARIANT_LIMIT: usize = 6;
 
-/// Decoder beam for the IME (accuracy/speed sweet spot, see M2 eval).
+/// Decoder beam for the IME (accuracy/speed sweet spot).
+///
+/// 128 was tried 2026-09-22 (valid +26 net) but the ship-gate on test traded
+/// native -5 for entities +9 at ~2x decode cost — valid's strata mix does not
+/// transfer; reverted to 64. Override with AKSHAR_BEAM (see tune_weights.rs).
 const DECODER_BEAM: usize = 64;
 
 fn decoder_beam() -> usize {
@@ -92,6 +96,23 @@ fn fuzzy_base() -> u64 {
         .unwrap_or(DEFAULT_FUZZY_BASE)
 }
 
+/// Blend weight for the corpus-bigram context bonus (`CorpusCtx::bonus`).
+/// Tuned offline on the sentence harness with predicted context; 0 disables.
+fn ctx_weight() -> f64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::core::context::CTX_W
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::env::var("AKSHAR_CTX_W")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|w| w.is_finite())
+            .unwrap_or(crate::core::context::CTX_W)
+    }
+}
+
 pub struct ImeEngine {
     pub decoder: ModelDecoder,
     pub reranker: Reranker,
@@ -115,6 +136,12 @@ pub struct ImeEngine {
     dictionary_path: Option<String>,
     pub sparse_table: Option<Vec<i8>>,
     pub sparse_scale: f64,
+    /// Previous word for corpus-bigram context (`set_context_word`).
+    /// Ephemeral session state: never persisted, never learned.
+    prev_word: Option<String>,
+    /// Pruned corpus bigram table. `None` (no table loaded) means context is
+    /// off and scoring is byte-identical to before.
+    corpus_ctx: Option<CorpusCtx>,
     suggestion_cache: RefCell<FxHashMap<String, Vec<(String, u64)>>>,
 }
 
@@ -162,6 +189,8 @@ impl ImeEngine {
             dictionary_path: None,
             sparse_table: None,
             sparse_scale: crate::core::reranker_weights::SPARSE_SCALE,
+            prev_word: None,
+            corpus_ctx: None,
             suggestion_cache: RefCell::new(FxHashMap::default()),
         }
     }
@@ -218,6 +247,8 @@ impl ImeEngine {
             } else {
                 crate::core::reranker_weights::SPARSE_SCALE
             },
+            prev_word: None,
+            corpus_ctx: None,
             suggestion_cache: RefCell::new(FxHashMap::default()),
         }
     }
@@ -299,6 +330,8 @@ impl ImeEngine {
             dictionary_path: None,
             sparse_table: None,
             sparse_scale: crate::core::reranker_weights::SPARSE_SCALE,
+            prev_word: None,
+            corpus_ctx: None,
             suggestion_cache: RefCell::new(FxHashMap::default()),
         }
     }
@@ -556,6 +589,32 @@ impl ImeEngine {
             let mut ranked = ranked;
             ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
 
+            // 1b. Corpus-bigram context blend, pre-squash: the bonus shifts the
+            // reranker margin before it is squashed into the u64 band, so the
+            // top candidate still scores exactly FRESH_SCALE and the decoder
+            // band can never leak above the user-trie band — band order holds
+            // structurally, not by constant-tuning. Off (byte-identical) when
+            // no table is loaded, prev is empty, weight is 0, or ablated.
+            if let (Some(ctx), Some(prev)) = (self.corpus_ctx.as_ref(), self.prev_word.as_deref()) {
+                if !crate::core::ablation::no_corpus_ctx() {
+                    let w = ctx_weight();
+                    if w != 0.0 {
+                        if let Some((top_dev, _)) = ranked.first() {
+                            let top = top_dev.clone();
+                            // No rank cutoff: measured 2026-09-22, a top-24
+                            // cascade cap cost 0.40pp top-5 / 0.44pp recall —
+                            // deep candidates with strong bigram evidence do
+                            // reach the top-8, including gold. The speed fix
+                            // is interning (v7), not a cutoff.
+                            for (dev, s) in ranked.iter_mut() {
+                                *s += ctx.bonus(prev, dev, &top, w);
+                            }
+                            ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
+                        }
+                    }
+                }
+            }
+
             let s_max = ranked.first().map(|(_, s)| *s).unwrap_or(0.0);
             for (dev, s) in ranked {
                 let cost = (s_max - s).max(0.0);
@@ -622,7 +681,29 @@ impl ImeEngine {
     /// gold sentence must not do the latter: learning the gold word makes
     /// every later occurrence trivially correct and the measurement
     /// self-fulfilling.  This is the context half on its own.
-    pub fn set_context_word(&mut self, _devanagari: &str) {}
+    ///
+    /// Previously an empty stub (so `evaluate_sentences` measured isolated
+    /// words while claiming context). Now records the previous word for the
+    /// corpus-bigram blend and clears the suggestion cache, whose entries are
+    /// prev-dependent. Empty string clears the context (sentence start).
+    pub fn set_context_word(&mut self, devanagari: &str) {
+        let next = if devanagari.is_empty() {
+            None
+        } else {
+            Some(devanagari.to_string())
+        };
+        if self.prev_word != next {
+            self.prev_word = next;
+            self.suggestion_cache.borrow_mut().clear();
+        }
+    }
+
+    /// Attach (or detach with `None`) the pruned corpus bigram table.
+    /// Clears the suggestion cache: scores depend on the table.
+    pub fn set_corpus_ctx(&mut self, ctx: Option<CorpusCtx>) {
+        self.corpus_ctx = ctx;
+        self.suggestion_cache.borrow_mut().clear();
+    }
 
     pub fn user_confirms(&mut self, roman: &str, devanagari: &str) {
         if roman.is_empty() || devanagari.is_empty() {
@@ -936,6 +1017,8 @@ mod tests {
             dictionary_path: None,
             sparse_table: None,
             sparse_scale: crate::core::reranker_weights::SPARSE_SCALE,
+            prev_word: None,
+            corpus_ctx: None,
             suggestion_cache: RefCell::new(FxHashMap::default()),
         }
     }

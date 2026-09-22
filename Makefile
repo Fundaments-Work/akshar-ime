@@ -127,6 +127,10 @@ train-quick:  ## Reranker on 100k pairs, ~10min. Does NOT exercise chunked mode.
 train-mid:  ## Reranker on 500k pairs (5 batches, ~40min). Validation gate for train-full.
 	@cargo run --release --bin train -- --reranker-pairs 500000 --epochs 5 --iterations 12
 
+train-mid-att:  ## train-mid + attestation-weighted EM/LM (tests convention dominance).
+	@cargo run --release --bin train -- --reranker-pairs 500000 --epochs 5 --iterations 12 \
+		--attestation --out data/akshar_attested.model
+
 train: train-mid  ## Alias for train-mid.
 
 train-full:  ## Reranker on all 3.59M pairs (36 batches, ~4h). Watch the dev loss.
@@ -144,6 +148,15 @@ eval-full:  ## Accuracy with bootstrap 95% CIs and per-query latency.
 eval-errors:  ## Oracle curves, error taxonomy, CER and the collision bound.
 	@cargo run --release --bin analyze_errors -- \
 		--dataset data/aksharantar/test_devanagari.jsonl --beam 256
+
+ctx-model:  ## Pruned corpus bigram sidecar for sentence context (data/corpus_bigrams.bin).
+	@cargo run --release --bin build_corpus_bigrams -- \
+		--corpus data/store/corpus_clean.txt --model data/akshar.model \
+		--threshold 20 --out data/corpus_bigrams.bin
+
+eval-sentences:  ## In-context word accuracy on held-out sentences (needs ctx-model).
+	@cargo run --release --bin evaluate_sentences -- --n 3000 --topk 5 \
+		--ctx data/corpus_bigrams.bin --ctx-mode predicted
 
 eval-ime:  ## Plain-language IME report + machine JSON for docs (docs/generated/eval.json).
 	@mkdir -p docs/generated

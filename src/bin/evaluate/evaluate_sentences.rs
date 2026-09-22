@@ -110,9 +110,12 @@ fn main() {
     let mut model_path = "data/akshar.model".to_string();
     let mut corpus_path = "data/store/corpus_clean.txt".to_string();
     let mut n_sentences = 3000usize;
+    let mut skip_sentences = 0usize;
     let mut topk = 5usize;
     let mut holdout_denom = DEFAULT_HOLDOUT_DENOM;
     let mut show_misses = 0usize;
+    let mut ctx_path: Option<String> = None;
+    let mut ctx_mode = "off".to_string();
 
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -135,6 +138,11 @@ fn main() {
                     .parse()
                     .unwrap()
             }
+            "--skip" => {
+                skip_sentences = args.next().expect("value").parse().unwrap();
+            }
+            "--ctx" => ctx_path = Some(args.next().expect("value for --ctx")),
+            "--ctx-mode" => ctx_mode = args.next().expect("value for --ctx-mode"),
             "--help" | "-h" => {
                 println!("evaluate_sentences — in-context word accuracy on held-out sentences");
                 println!("  --model <path>          unified model (default data/akshar.model)");
@@ -143,6 +151,12 @@ fn main() {
                 println!("  --topk <k>              top-k cutoff (default 5)");
                 println!("  --holdout-denom <d>     hold out 1 sentence in d (default 200)");
                 println!("  --show-misses <n>       print n in-context top-1 misses");
+                println!("  --skip <k>              skip the first k held-out sentences");
+                println!("    (disjoint tuning set: --skip 1000 --n 1000 avoids the measured 0-1000 window)");
+                println!("  --ctx <path>            corpus bigram sidecar (enables context)");
+                println!("  --ctx-mode <m>          off|oracle|predicted (default off)");
+                println!("    oracle feeds the gold prev word (ceiling); predicted feeds the");
+                println!("    engine's own top-1 pick (realistic; errors propagate).");
                 return;
             }
             other => {
@@ -158,6 +172,7 @@ fn main() {
         std::process::exit(1);
     });
     let mut sentences: Vec<Vec<String>> = Vec::with_capacity(n_sentences);
+    let mut skipped = 0usize;
     for line in BufReader::new(file).lines().map_while(Result::ok) {
         if sentences.len() >= n_sentences {
             break;
@@ -168,6 +183,10 @@ fn main() {
         }
         let words: Vec<String> = line.split_whitespace().map(str::to_string).collect();
         if words.len() >= 2 {
+            if skipped < skip_sentences {
+                skipped += 1;
+                continue;
+            }
             sentences.push(words);
         }
     }
@@ -192,6 +211,28 @@ fn main() {
         romanizer.best.len()
     );
     let mut engine = ImeEngine::from_unified(unified);
+    if !matches!(ctx_mode.as_str(), "off" | "oracle" | "predicted") {
+        eprintln!("unknown --ctx-mode {ctx_mode} (want off|oracle|predicted)");
+        std::process::exit(2);
+    }
+    if let Some(path) = &ctx_path {
+        match akshar_ime::core::context::CorpusCtx::load(Path::new(path)) {
+            Ok(ctx) => {
+                eprintln!(
+                    "corpus context: {} bigrams from {path} (mode {ctx_mode})",
+                    ctx.table.len()
+                );
+                engine.set_corpus_ctx(Some(ctx));
+            }
+            Err(e) => {
+                eprintln!("cannot load ctx sidecar {path}: {e}");
+                std::process::exit(1);
+            }
+        }
+    } else if ctx_mode != "off" {
+        eprintln!("--ctx-mode {ctx_mode} needs --ctx <sidecar>");
+        std::process::exit(2);
+    }
 
     let mut misses: Vec<(String, String, Vec<String>, String)> = Vec::new();
     let mut t = Tally::default();
@@ -206,7 +247,12 @@ fn main() {
         for (i, gold) in words.iter().enumerate() {
             let Some(roman) = romanizer.romanize(gold) else {
                 skipped_words += 1;
-                engine.set_context_word(gold);
+                // Unscored (aksharas unknown to the model): the user still
+                // typed the word, so oracle continuity uses gold. Predicted
+                // mode has no pick; gold is the only honest fallback.
+                if ctx_mode != "off" {
+                    engine.set_context_word(gold);
+                }
                 continue;
             };
             scored_any = true;
@@ -264,7 +310,15 @@ fn main() {
                 ));
             }
 
-            engine.set_context_word(gold);
+            // Advance the context: oracle feeds gold (ceiling), predicted feeds
+            // the engine's own top-1 (realistic; errors propagate), off feeds
+            // nothing (isolated words — the pre-context baseline).
+            match ctx_mode.as_str() {
+                "oracle" => engine.set_context_word(gold),
+                "predicted" => engine
+                    .set_context_word(suggestions.first().map(|(d, _)| d.as_str()).unwrap_or("")),
+                _ => {}
+            }
         }
 
         if scored_any {

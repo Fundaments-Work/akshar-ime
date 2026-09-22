@@ -77,7 +77,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 #[derive(Deserialize)]
@@ -137,6 +137,37 @@ fn auto_detect_text() -> Option<PathBuf> {
     None
 }
 
+/// Stream the running-text corpus into cleaned token counts, honoring the
+/// shared holdout split exactly as Phase 2 always has (untrimmed line keys,
+/// so sentence-eval words never leak into vocab/WordTrie/freq priors).
+/// Extracted so the attestation pre-pass and Phase 2 share one implementation.
+fn count_corpus_tokens(tp: &Path) -> Result<(HashMap<String, u32>, usize)> {
+    let mut freq: HashMap<String, u32> = HashMap::new();
+    let mut skipped_holdout = 0usize;
+    let tf = File::open(tp).context("open text file")?;
+    for line in BufReader::new(tf).lines().map_while(Result::ok) {
+        if is_holdout(&line, DEFAULT_HOLDOUT_DENOM) {
+            skipped_holdout += 1;
+            continue;
+        }
+        for token in line.split_whitespace() {
+            if let Some(clean) = clean_devanagari_token(token) {
+                *freq.entry(clean).or_insert(0) += 1;
+            }
+        }
+    }
+    Ok((freq, skipped_holdout))
+}
+
+/// Attestation weight for a Devanagari form: 1 + floor(ln(1+f)).
+/// Unseen forms weigh 1.0 (identical to unweighted training); integer steps
+/// keep KN counts-of-counts valid. f=38k (top words) -> 11.
+fn attestation_weight(freq: &HashMap<String, u32>, nat: &str) -> u32 {
+    let key = clean_devanagari_token(nat).unwrap_or_else(|| nat.to_string());
+    let f = freq.get(&key).copied().unwrap_or(0);
+    1 + (1.0 + f as f64).ln().floor() as u32
+}
+
 const RERANK_DECODE_DEPTH: usize = 50;
 const RERANK_DECODE_BEAM: usize = 64;
 
@@ -151,6 +182,12 @@ fn main() -> Result<()> {
     let mut reranker_pairs: usize = 100_000;
     let mut wasm_mode = false;
     let mut smoke = false;
+    let mut attestation = false;
+    // Attestation weighting (Roark/Dakshina §4.2 pattern): weight each EM/LM
+    // pair by log-dampened corpus frequency of its Devanagari side, so
+    // dominant romanization conventions dominate training. Off = all weights
+    // 1.0 = byte-identical current behavior. Reranker sampling stays uniform
+    // (isolates the EM/LM effect).
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -202,6 +239,7 @@ fn main() -> Result<()> {
             }
             "--wasm" => wasm_mode = true,
             "--smoke" => smoke = true,
+            "--attestation" => attestation = true,
             "-h" | "--help" => {
                 println!("Akshar Unified Model Trainer");
                 println!("Usage: cargo run --release --bin train -- [options]");
@@ -215,6 +253,7 @@ fn main() -> Result<()> {
                 println!("  --epochs <n>            Reranker epochs (default: 3)");
                 println!("  --wasm                  Export lightweight WASM web profile");
                 println!("  --smoke                 Run fast smoke training validation");
+                println!("  --attestation           Weight EM/LM pairs by log corpus frequency");
                 return Ok(());
             }
             other => {
@@ -273,6 +312,27 @@ fn main() -> Result<()> {
 
     let start_time = Instant::now();
 
+    // Phase 0: attestation pre-pass (only with --attestation). Counts the
+    // corpus once so EM/LM pair weights reflect token frequency; the same
+    // map feeds Phase 2 below (no re-stream).
+    let attest_freq: Option<HashMap<String, u32>> = if attestation {
+        let tp = text_file
+            .as_ref()
+            .context("--attestation needs running text (--text or auto-detect)")?;
+        println!("\n[Phase 0/4] Counting corpus for attestation weights...");
+        let t0 = Instant::now();
+        let (freq, skipped) = count_corpus_tokens(tp)?;
+        println!(
+            "Counted {} types in {:.1?} ({} held-out lines skipped).",
+            freq.len(),
+            t0.elapsed(),
+            skipped
+        );
+        Some(freq)
+    } else {
+        None
+    };
+
     // Phase 1: EM
     println!("\n[Phase 1/4] Training EM Source-Channel Transliteration Model...");
     let em_t0 = Instant::now();
@@ -287,6 +347,8 @@ fn main() -> Result<()> {
     let f = File::open(&pairs_file).context("open pairs file")?;
     let mut raw_pairs: Vec<(String, String)> = Vec::new();
     let mut count = 0usize;
+    // Attestation observability (else we're flying blind).
+    let (mut wmax, mut wsum) = (0u32, 0u64);
 
     for line in BufReader::new(f).lines().map_while(Result::ok) {
         let t = line.trim();
@@ -297,7 +359,15 @@ fn main() -> Result<()> {
             let eng = rec.english.trim().to_ascii_lowercase();
             let nat = rec.native.trim().to_string();
             if !eng.is_empty() && !nat.is_empty() {
-                em_trainer.add_pair_weighted(&eng, &nat, f64::from(rec.weight));
+                // Attestation: log-dampened corpus frequency of the Devanagari
+                // side; off (None) reproduces the file weight (default 1.0).
+                let w = match attest_freq.as_ref() {
+                    Some(freq) => attestation_weight(freq, &nat),
+                    None => rec.weight,
+                };
+                wmax = wmax.max(w);
+                wsum += w as u64;
+                em_trainer.add_pair_weighted(&eng, &nat, f64::from(w));
                 raw_pairs.push((eng, nat));
                 count += 1;
                 if let Some(lim) = limit {
@@ -309,6 +379,13 @@ fn main() -> Result<()> {
         }
     }
     println!("Ingested {} valid parallel pairs.", count);
+    if attestation {
+        println!(
+            "Attestation weights: max={} mean={:.2} (1.0 = unseen, log-dampened).",
+            wmax,
+            wsum as f64 / count.max(1) as f64
+        );
+    }
 
     let mut translit_model = em_trainer.finalize(&em_config);
     translit_model.build_trigram_index();
@@ -322,33 +399,29 @@ fn main() -> Result<()> {
     // Phase 2: vocab
     println!("\n[Phase 2/4] Compiling Vocabulary & Empirical Frequencies...");
     let vocab_t0 = Instant::now();
-    let mut vocab_freq: HashMap<String, u32> = HashMap::new();
-
-    if let Some(ref tp) = text_file {
-        if tp.exists() {
-            println!("Reading running text from {} ...", tp.display());
-            let tf = File::open(tp).context("open text file")?;
-            let mut skipped_holdout = 0usize;
-            for line in BufReader::new(tf).lines().map_while(Result::ok) {
-                // Exp 5: honor the shared holdout split so sentence-eval words
-                // never leak into vocab/WordTrie/freq priors. Pass
-                // --holdout-denom 0 to evaluate_sentences for the old behavior.
-                if is_holdout(&line, DEFAULT_HOLDOUT_DENOM) {
-                    skipped_holdout += 1;
-                    continue;
-                }
-                for token in line.split_whitespace() {
-                    if let Some(clean) = clean_devanagari_token(token) {
-                        *vocab_freq.entry(clean).or_insert(0) += 1;
-                    }
+    // Reuse the attestation pre-pass map when present (same implementation,
+    // zero re-stream); otherwise count as before.
+    let mut vocab_freq: HashMap<String, u32> = match attest_freq {
+        Some(freq) => {
+            println!("Reusing Phase-0 corpus counts for the vocabulary.");
+            freq
+        }
+        None => {
+            let mut vocab_freq: HashMap<String, u32> = HashMap::new();
+            if let Some(ref tp) = text_file {
+                if tp.exists() {
+                    println!("Reading running text from {} ...", tp.display());
+                    let (freq, skipped_holdout) = count_corpus_tokens(tp)?;
+                    vocab_freq = freq;
+                    println!(
+                        "Skipped {} held-out lines (1-in-{} split).",
+                        skipped_holdout, DEFAULT_HOLDOUT_DENOM
+                    );
                 }
             }
-            println!(
-                "Skipped {} held-out lines (1-in-{} split).",
-                skipped_holdout, DEFAULT_HOLDOUT_DENOM
-            );
+            vocab_freq
         }
-    }
+    };
 
     let raw_vocab_count = vocab_freq.len();
     vocab_freq.retain(|_, &mut c| c >= min_freq);
@@ -1014,4 +1087,25 @@ fn main() -> Result<()> {
     );
     println!("============================================================");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn attestation_weight_shape() {
+        let mut freq = HashMap::new();
+        freq.insert("नमस्ते".to_string(), 1000u32);
+        freq.insert("छ".to_string(), 2u32);
+        // unseen -> 1 (identical to unweighted training)
+        assert_eq!(attestation_weight(&freq, "कखग",), 1);
+        assert_eq!(attestation_weight(&HashMap::new(), "नमस्ते"), 1);
+        // monotone in frequency, log-dampened (1000 -> 1+6=7, not 1001)
+        let w_hi = attestation_weight(&freq, "नमस्ते");
+        let w_lo = attestation_weight(&freq, "छ");
+        assert!(w_hi > w_lo && w_lo >= 1, "{w_hi} {w_lo}");
+        assert_eq!(w_hi, 1 + (1.0 + 1000.0f64).ln().floor() as u32);
+    }
 }

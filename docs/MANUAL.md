@@ -96,8 +96,11 @@ browser profile is 8.91 MB raw and 4.94 MB Brotli-compressed.
 
 ## What it is not
 
-It is not a general Indic transliteration system --- it is trained and measured
-on one language's data only. It does not beat neural baselines on named
+It is not a general Indic transliteration system across scripts — it is a
+Devanagari-**script** engine: language-agnostic by design (akshara units,
+script-wide emissions, no language tag in the pipeline), but its shipped
+priors (frequency vocabulary, suffix handling) are still biased toward the
+domains seen in training. It does not beat neural baselines on named
 entities (§9.2). And
 it does not yet reach the 90% native accuracy that its error analysis shows is
 attainable (§12).
@@ -1122,9 +1125,10 @@ calling a difference "within noise".
 
 Stated so a reader can weigh the results rather than take them on trust.
 
-**Single benchmark.** All accuracy comes from one test set of one language. The
-Dakshina benchmark [Roark et al. 2020], on which the IndicXlit comparison
-figures are usually quoted, is not evaluated here.
+**Single benchmark.** All accuracy comes from one Devanagari test set
+(Aksharantar, 4,101 cases) with domain-skewed priors. Per-language strata
+and a second benchmark (Dakshina [Roark et al. 2020], on which the IndicXlit
+comparison figures are usually quoted) are not evaluated here.
 
 **Baseline comparability.** IndicXlit numbers (80.25% native, 52.67%
 named-entity top-1) are quoted from [Madhani et al. 2023], **not re-measured**
@@ -1152,6 +1156,7 @@ validation split exists and should be used for them.
 | `make eval-full` | bootstrap CIs, MRR, latency |
 | `make eval-ime` | plain-language report (correct-first-time, visible-in-top-5, keystrokes-saved) plus machine JSON at `docs/generated/eval.json` for regenerating every number in this manual |
 | `make eval-errors` | oracle curves, error taxonomy, CER, collision bound |
+| `make eval-sentences` | in-context word accuracy on held-out sentences (`--ctx-mode off\|oracle\|predicted`; needs `make ctx-model`) |
 | `make ablate` | per-component contribution |
 | `cargo test --release` | unit tests plus the accuracy regression guard |
 
@@ -1565,11 +1570,15 @@ but it is not currently earning its place.
 
 ## Scope limitations
 
-* **One language.** Trained and measured on a single language's data.
-  Concretely Nepali: the 34-suffix strip list (§7.2), `fuzzy/grammar.rs`
-  orthography scores, and the news-domain vocabulary are Nepali-specific and
-  hand- or corpus-derived, not learned multilingually. The engine is script-
-  general but the shipped priors are not.
+* **Script-general engine, biased priors.** The modelling core (akshara
+  segmentation, EM emissions, KN LM, decoder, scoring) is
+  Devanagari-script-general: nothing downstream reads the language a pair
+  came from. The shipped *priors* are not yet equally general: the 34-suffix
+  strip list (§7.2), `fuzzy/grammar.rs` orthography scores, and the
+  news-domain vocabulary skew toward observed domains (concretely Nepali
+  news/Wikipedia). The program to close that gap — script-wide frequency
+  priors, language-agnostic morphology, stratified per-language eval with a
+  pooled script headline — is `docs/plans/devanagari-script-plan.md`.
 * **Installed as a Nepali keyboard.** `devanagari-smart.xml` declares
   `<language>ne</language>`; that tag controls IBus activation, not model
   behaviour, but it means multi-language support is untested at the OS layer.
@@ -1588,6 +1597,13 @@ but it is not currently earning its place.
 \newpage
 
 # Roadmap
+
+The goal is **Devanagari-script accuracy**: one engine that serves every
+language written in Devanagari lipi, judged by a pooled script headline with
+per-language strata underneath — not by tuning to any single language's
+distribution. Delivery surfaces (Cloudflare playground, Chrome extension)
+follow accuracy; they do not lead it. The live work plan is
+`docs/plans/devanagari-script-plan.md`.
 
 The measured decomposition of the 18.2 missing points on native words:
 

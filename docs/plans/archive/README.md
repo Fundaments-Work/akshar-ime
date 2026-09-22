@@ -18,6 +18,10 @@ Read in this order:
 | `2026-09-05-research-agenda.md` | Sep 5 | Mathematics considered but not executed: context-tree weighting, A* anytime decoding, the entropy harness, incremental decoding. |
 | `2026-09-05-roadmap-to-90.md` | Sep 5 | First plan to 90%: audit of how every byte of data is used. |
 | `2026-09-05-path-past-90.md` | Sep 5 | Revision of the above, with the W0 measurement-gate results. |
+| `2026-09-22-factored-matra-model.md` | Sep 22 | Factored P(C\|R)·P(M\|C,R) matra model: implemented, measured, falsified as a word-level prior (78/182 head-to-head); code removed. |
+| `2026-09-22-top2-discriminator.md` | Sep 22 | Top-2 swap discriminator: 3 training regimes (full/string-only/domain-matched), no operating point above baseline; code removed. |
+| `2026-09-22-mbr-selection.md` | Sep 22 | MBR consensus: 24 configs on valid native, best +2/798 (noise); converged lists carry no votable information; probe removed. |
+| `2026-09-22-ne-routing.md` | Sep 22 | NE burial analysis: router/demotion/attenuation killed (deep 6%, demote +140/−138, freq-burial 14%); 46% absent = generation gap, needs training; probe removed. |
 
 There are currently no live planning documents — `docs/plans/` holds only this
 archive. The live roadmap is `docs/MANUAL.md` §12–13, and the mathematics and

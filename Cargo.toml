@@ -75,6 +75,10 @@ name = "eval_ime"
 path = "src/bin/evaluate/eval_ime.rs"
 
 [[bin]]
+name = "tune_weights"
+path = "src/bin/evaluate/tune_weights.rs"
+
+[[bin]]
 name = "evaluate_sentences"
 path = "src/bin/evaluate/evaluate_sentences.rs"
 
@@ -85,6 +89,10 @@ path = "src/bin/evaluate/analyze_errors.rs"
 # ------------------------------------------------------------------------------
 # Data Construction & Utility Binaries (src/bin/build/)
 # ------------------------------------------------------------------------------
+
+[[bin]]
+name = "build_corpus_bigrams"
+path = "src/bin/build/build_corpus_bigrams.rs"
 
 [[bin]]
 name = "pack_model"

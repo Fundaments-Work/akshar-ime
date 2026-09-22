@@ -31,6 +31,8 @@ pub mod wordtrie;
 /// | `AKSHAR_GAMMA` | override the dense/heuristic blend (0.0 = heuristic only) |
 /// | `AKSHAR_NO_TRIGRAM` | force the LM to back off to bigrams |
 /// | `AKSHAR_NO_VARIANTS` | decode the raw query only, no normalizer variants |
+/// | `AKSHAR_NO_CORPUS_CTX` | skip the corpus-bigram context blend |
+/// | `AKSHAR_CTX_W` | context blend weight (default 0.5; 0 disables) |
 /// | `AKSHAR_CACHE_SIZE` | suggestion-cache size (default 256) |
 /// | `AKSHAR_DATA_DIR` | model directory override |
 /// | `AKSHAR_USER_TRIE_BASE` | learned-word base score (default 900000) |
@@ -71,6 +73,10 @@ pub mod ablation {
     cached_flag!(no_rerank, "AKSHAR_NO_RERANK");
     cached_flag!(no_trigram, "AKSHAR_NO_TRIGRAM");
     cached_flag!(no_variants, "AKSHAR_NO_VARIANTS");
+    // Skip the corpus-bigram context blend (engine step 1b). Off by default
+    // only in the sense that no table ships yet: with no table loaded the
+    // blend is already byte-identical, with or without this flag.
+    cached_flag!(no_corpus_ctx, "AKSHAR_NO_CORPUS_CTX");
 
     /// Dense/heuristic blend override; `None` means use the compiled GAMMA.
     /// Non-finite values (NaN/±inf from a bad env string) are rejected here

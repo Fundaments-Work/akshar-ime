@@ -1,6 +1,63 @@
 # Changelog
 
-## Unreleased — correctness fixes + pipeline repair (2026-09-10)
+## Unreleased
+
+### Sentence context via corpus bigrams
+New information, not new parameters: the engine now blends P(cur | prev)
+from a pruned corpus bigram table into the pre-squash reranker margin
+(engine step 1b). `set_context_word` was an empty stub — `evaluate_sentences`
+measured isolated words while claiming context — and is now the context half
+of `user_confirms` (sets prev, clears the prev-dependent suggestion cache).
+
+- Table: `build_corpus_bigrams` (`make ctx-model`), count >= 20, current word
+  in-vocab; 436k pairs as a gitignored sidecar (`data/corpus_bigrams.bin`).
+  Ships outside the container for now (v7 interning to u32 vocab ids is the
+  follow-up: ~24 MB string-keyed -> ~5 MB packed).
+- Blend, not override: `CorpusCtx::bonus` is the bigram log-ratio vs the top
+  candidate at weight `CTX_W = 0.5` (`AKSHAR_CTX_W`, off at 0), applied to the
+  top 24 pre-squash, with an abstention rule (no vote unless prev is observed
+  with cur or top — otherwise it re-ranks by unigram ratio and regresses).
+  `AKSHAR_NO_CORPUS_CTX=1` ablates; no table or empty prev is byte-identical.
+- Measured (`make eval-sentences`, 1000 held-out sentences, synthetic
+  best-chunk roman): word@1 87.58% -> **88.80% predicted** / 88.86% oracle
+  (+1.22pp realistic), sentence-exact 23.70% -> 26.80%. Predicted within
+  0.06pp of oracle: error propagation is negligible.
+- Cost: +0.12 ms/word on the sentence harness (0.42 -> 0.54 ms); isolated
+  AK-Freq unchanged (no prev, no table in that path).
+- Harness honesty: `evaluate_sentences --ctx-mode off|oracle|predicted`
+  (default off = the old isolated number).
+
+### Joint knob tuning (infrastructure; defaults unchanged)
+- New `tune_weights` bin: coordinate descent over `AKSHAR_GAMMA`,
+  `AKSHAR_BEAM`, `AKSHAR_RERANK_DEPTH`, `AKSHAR_NO_TRIE_UNION` on valid
+  (exact top-1 counts via subprocess env; OnceLock flags can't vary
+  in-process), plus a `CTX_W` line search on disjoint sentences.
+- Outcome: nothing shipped. Pooled-valid tuning (+3.27pp) cratered test
+  native −4.18pp (wrong objective: it robbed the native family for entity
+  strata). True top-1 tuning converged to near-defaults (+4 hits valid
+  AK-Freq). Baked beam=128/depth=16 experimentally, ship-gate on test traded
+  native −5 for entities +9 at ~2x latency — reverted. Lesson recorded in the
+  constants' doc comments: valid's strata mix does not transfer; the remaining
+  path is conditional-γ per stratum, not better scalars.
+- `evaluate_aksharantar` now prints `(top1 h/n, top5 h/n)`; the old bare
+  `(h/n)` was top-5 counts and once sent the tuner chasing the wrong metric.
+- Conditional frequency-rank blend tried and removed same-day: every
+  `AKSHAR_GAMMA_HI` > LO harmed native while pooled rose (constraint held);
+  converged to uniform. Reweighting cannot create signal — entities need
+  entity features, not weight.
+
+### Morphology union table (infrastructure; nil accuracy on valid)
+
+- `MORPH_SUFFIXES` 34 → 164: Snowball Hindi port (BSD, provenance comments)
+  + longest-first ordering (fixes old first-match mis-strips) + consonant
+  gate for leading-implicit-a forms (`akshara::is_consonant`); unit-pinned
+  (table length, ordering, gate fall-through).
+- Measured nil on valid (−5 pooled, noise); ceiling probe caps the track at
+  13 rescuable valid-native misses, mostly via the old 34 — Nepali/Marathi
+  transcription cancelled on cost/benefit. Table stays as zero-cost gated
+  data; future retrains train sparse template 5 on the new firings.
+
+### Correctness fixes + pipeline repair (2026-09-10)
 
 Correctness-first audit: 14 code fixes across the engine, FFI, IBus layer,
 trainer, and CI, each logged in `docs/plans/correctness-audit-2026-09-10.md`.
@@ -8,7 +65,7 @@ trainer, and CI, each logged in `docs/plans/correctness-audit-2026-09-10.md`.
 within bootstrap noise (`make eval`: 80.98/45.32/29.01 vs 81.02/45.75/29.50
 on the previous artifact with identical code; pooled CIs overlap).
 
-### Fixed — engine
+#### Fixed — engine
 - `Trie::get_top_k_suggestions` max-heap inversion returned the wrong k
   (e.g. {3,1} instead of {3,2}); now a `Reverse` min-heap (+ regression test).
 - `ModelDecoder::build_edges` byte-slicing panicked on non-ASCII input;
@@ -19,7 +76,7 @@ on the previous artifact with identical code; pooled CIs overlap).
   `ImeEngine::reset_learned_state()` replaces the WASM reset path that
   silently dropped the unified vocab/word-trie/sparse table.
 
-### Fixed — FFI / IBus
+#### Fixed — FFI / IBus
 - C API: `static mut` engine → `OnceLock<Mutex<Option<…>>>`; NULL inputs
   yield `"[]"`/no-op instead of UB; no `unwrap()` across `extern "C"`;
   missing/non-UTF8 config dir falls back to an in-memory engine;
@@ -30,7 +87,7 @@ on the previous artifact with identical code; pooled CIs overlap).
   cursor position, bounds-checked candidate selection, checked
   `ibus_bus_request_name`.
 
-### Fixed — training pipeline
+#### Fixed — training pipeline
 - `DenseStats` accumulated z-scores and the pack step overwrote the result
   with stale constants — retrained models were silently decalibrated.
   Now accumulates raw features and packs the fresh statistics
@@ -40,13 +97,13 @@ on the previous artifact with identical code; pooled CIs overlap).
   (batch-2 weights over the overfit final).
 - Phase-2 vocabulary now honors the shared `holdout` split (14,465 lines).
 
-### Docs
+#### Docs
 - Headline numbers re-measured on the retrained model (README, MANUAL §1,
   `data/README.md`, regenerated `docs/generated/eval.json`); 2026-09-08
   ablation/McNemar tables kept as the dated significance record.
 - `AKSHAR_FUZZY_BASE` default corrected to 600,000 (was 50,000 pre-D18).
 
-### CI
+#### CI
 - Now enforces the documented gate: `cargo fmt --check`, release-profile
   clippy/tests with `-D warnings`, and the wasm target check.
 

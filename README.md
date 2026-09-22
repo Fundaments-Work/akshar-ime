@@ -1,7 +1,8 @@
 # Akshar Devanagari IME
 
-Roman-script input method for Devanagari. You type
-`namaste`, it offers `नमस्ते`.
+Roman-script input method for the Devanagari **script** — not one language.
+You type `namaste`, it offers `नमस्ते`, whether the word is Hindi, Nepali,
+Marathi, Sanskrit, or any other language written in Devanagari lipi.
 
 ![CI](https://github.com/sapienskid/akshar-ime/actions/workflows/ci.yml/badge.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue)
@@ -116,7 +117,14 @@ model and language model always use all 3.59M pairs.
 
 ## Honest limitations
 
-- One language's data, one test set (Aksharantar).
+- Script-general engine, still biased priors: the akshara model, decoder, and
+  scoring are language-agnostic (nothing downstream reads a language tag —
+  `data/README.md`), but the frequency vocabulary is news-domain-heavy, the
+  34-suffix strip list is Nepali-specific, and the test set is one
+  Devanagari benchmark. Making the *priors* as script-general as the *engine*
+  is the accuracy program (`docs/MANUAL.md` §§11–13,
+  `docs/plans/devanagari-script-plan.md`).
+- One benchmark, one test set (Aksharantar, 4,101 cases).
 - Named entities are well behind the neural baseline.
 - Reranking is worth +6.45pp overall on the 2026-09-08 model (+0.24pp dense+sparse
   on the retrained model at full 80.98% vs heuristic-only 80.74%), but **most of

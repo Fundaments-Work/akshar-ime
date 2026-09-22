@@ -75,8 +75,8 @@ impl Report {
             let t1 = s.top1 as f64 / s.total as f64 * 100.0;
             let tk = s.topk as f64 / s.total as f64 * 100.0;
             println!(
-                "  {:<18} top1={:>5.2}%  top{topk}={:>5.2}%  ({}/{})",
-                bucket, t1, tk, s.topk, s.total
+                "  {:<18} top1={:>5.2}%  top{topk}={:>5.2}%  (top1 {}/{}, top5 {}/{})",
+                bucket, t1, tk, s.top1, s.total, s.topk, s.total
             );
         }
         if show_misses > 0 {

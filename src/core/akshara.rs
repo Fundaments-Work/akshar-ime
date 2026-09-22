@@ -14,6 +14,12 @@
 //   "अग"       -> ["अ", "ग"]
 //   "आई"       -> ["आ", "ई"]      (two independent-vowel akshara)
 
+/// True for Devanagari consonants (the `Consonant` class below, including
+/// nukta forms). Used by the morphology strip's preceding-consonant gate.
+pub fn is_consonant(ch: char) -> bool {
+    matches!(classify(ch), AksharaClass::Consonant)
+}
+
 /// Categorise a single Devanagari codepoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AksharaClass {
