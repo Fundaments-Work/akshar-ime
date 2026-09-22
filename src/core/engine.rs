@@ -57,18 +57,6 @@ fn cache_limit() -> usize {
         .unwrap_or(256)
 }
 
-#[allow(dead_code)]
-fn adaptive_beam(roman_len: usize) -> usize {
-    let base = decoder_beam();
-    if roman_len <= 3 {
-        (base / 2).max(8)
-    } else if roman_len <= 5 {
-        (base * 3 / 4).max(12)
-    } else {
-        base
-    }
-}
-
 /// Scale converting a reranker log-score into the engine's higher-better u64 score.
 const FRESH_SCALE: f64 = 800_000.0;
 /// Purnabiram (।, U+0964) — mapped from a trailing '.'.
@@ -132,7 +120,6 @@ pub struct ImeEngine {
     pub symspell: SymSpell,
     pub(crate) transliteration_model: TransliterationModel,
     learning_engine: LearningEngine,
-    #[allow(dead_code)]
     dictionary_path: Option<String>,
     pub sparse_table: Option<Vec<i8>>,
     pub sparse_scale: f64,
