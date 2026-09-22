@@ -86,6 +86,10 @@ path = "src/bin/evaluate/evaluate_sentences.rs"
 name = "analyze_errors"
 path = "src/bin/evaluate/analyze_errors.rs"
 
+[[bin]]
+name = "eval_langs"
+path = "src/bin/evaluate/eval_langs.rs"
+
 # ------------------------------------------------------------------------------
 # Data Construction & Utility Binaries (src/bin/build/)
 # ------------------------------------------------------------------------------
@@ -101,6 +105,10 @@ path = "src/bin/build/pack_model.rs"
 [[bin]]
 name = "prepare_pairs"
 path = "src/bin/build/prepare_pairs.rs"
+
+[[bin]]
+name = "calibrate_blend"
+path = "src/bin/build/calibrate_blend.rs"
 
 [[bin]]
 name = "build_wordfreq_text"

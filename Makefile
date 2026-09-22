@@ -29,7 +29,7 @@ TRIGRAM_THRESHOLD ?= 3e-2
         restart-ibus help wasm wasm-clean release-upload pack web-model \
         train train-quick train-mid train-full eval eval-full eval-ime eval-errors \
         ablate manual docs check check-native check-wasm release-check data-fetch \
-        data-prepare
+        data-prepare eval-langs
 # --- Main Targets ---
 
 all: release  ## Build the engine for release (default).
@@ -156,6 +156,14 @@ train-full:  ## Reranker on all 3.59M pairs (36 batches, ~4h). Watch the dev los
 	@cargo run --release --bin train -- --reranker-pairs 0 --epochs 5 --iterations 12
 
 # --- Evaluation ---------------------------------------------------------------
+
+# Every Devanagari language, IME metrics (top-1 / in-list@8 / MRR) per
+# language and source.  Tune on SPLIT=valid; read test once per decision.
+# MODEL=path evaluates a specific container instead of the installed lookup.
+SPLIT ?= test
+eval-langs:  ## Per-language IME metrics on data/pairs/$(SPLIT).jsonl (needs data-prepare).
+	@cargo run --release --bin eval_langs -- --dataset data/pairs/$(SPLIT).jsonl \
+		$(if $(MODEL),--model $(MODEL),) $(if $(JSON),--json $(JSON),)
 
 eval:  ## Aksharantar accuracy by split (AK-Freq / AK-NEF / AK-NEI).
 	@cargo run --release --bin evaluate_aksharantar -- \
