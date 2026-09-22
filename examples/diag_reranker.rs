@@ -56,9 +56,13 @@ fn main() {
     let mut samples: Vec<Item> = Vec::new();
     let mut empty_sparse = 0usize;
     let mut identical_sparse = 0usize;
+    let counts = akshar_ime::core::reranker::VocabCounts {
+        freq: &vocab_freq,
+        ranks: &ranks,
+    };
     for (roman, gold) in &pairs {
         let cands = decoder.decode_union(roman, 50, None);
-        let (order, heur, heur_rank) = rank_candidates(&cands, &vocab_freq);
+        let (order, heur, heur_rank) = rank_candidates(&cands, &counts);
         if let Some(target_idx) = order.iter().position(|c| &c.dev == gold) {
             let sparse: Vec<Vec<usize>> = order
                 .iter()
@@ -77,15 +81,8 @@ fn main() {
                 .iter()
                 .enumerate()
                 .map(|(idx, c)| {
-                    let dense = extract_dense_features(
-                        c,
-                        idx,
-                        heur[idx],
-                        heur_rank[idx],
-                        roman,
-                        &vocab_freq,
-                        &ranks,
-                    );
+                    let dense =
+                        extract_dense_features(c, idx, heur[idx], heur_rank[idx], roman, &counts);
                     (0..DENSE_DIM)
                         .map(|k| W_DENSE[k] * ((dense[k] - MEAN_DENSE[k]) / STD_DENSE[k]))
                         .sum()

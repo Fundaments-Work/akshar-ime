@@ -265,16 +265,66 @@ pub fn get_morph_suffix(dev: &str) -> Option<&'static str> {
     })
 }
 
-pub fn morph_effective_log_freq(dev: &str, freq: &HashMap<String, u32>) -> f64 {
-    let f = freq.get(dev).copied().unwrap_or(0);
-    if f > 0 {
-        return (1.0 + f as f64).ln();
+/// What the ranker knows about how common a word is.
+///
+/// Counts are on one scale for every source: occurrences per ~100M tokens of
+/// running text (the legacy Nepali corpus had 86M, so its raw counts already
+/// are).  0 means the word is unknown.
+pub trait WordCounts {
+    fn count(&self, word: &str) -> f64;
+    /// Frequency-rank percentile in [0, 1]: 0 for the most frequent word,
+    /// 1 for an unknown one.
+    fn rank_pct(&self, word: &str) -> f64;
+}
+
+/// The single-language corpus vocabulary of v1-v7 models.
+pub struct VocabCounts<'a> {
+    pub freq: &'a HashMap<String, u32>,
+    pub ranks: &'a FreqRanks,
+}
+
+impl WordCounts for VocabCounts<'_> {
+    fn count(&self, word: &str) -> f64 {
+        f64::from(self.freq.get(word).copied().unwrap_or(0))
+    }
+    fn rank_pct(&self, word: &str) -> f64 {
+        self.ranks
+            .rank_of
+            .get(word)
+            .copied()
+            .unwrap_or(self.ranks.total) as f64
+            / self.ranks.total.max(1) as f64
+    }
+}
+
+/// The per-language lexicon of v8 models: counts in one language, or with no
+/// language the highest count in any.
+pub struct LexiconCounts<'a> {
+    pub lexicon: &'a crate::core::lexicon::Lexicon,
+    pub lang: Option<usize>,
+}
+
+impl WordCounts for LexiconCounts<'_> {
+    fn count(&self, word: &str) -> f64 {
+        self.lexicon.count(word, self.lang)
+    }
+    fn rank_pct(&self, word: &str) -> f64 {
+        // Levels are log-frequency, so a falling level is a rising rank.
+        1.0 - f64::from(self.lexicon.level(word, self.lang)) / 255.0
+    }
+}
+
+/// Log frequency, backing off to the stem for an unseen inflected form: an
+/// agglutinated word may be absent while its stem is frequent.
+pub fn morph_effective_log_freq(dev: &str, counts: &dyn WordCounts) -> f64 {
+    let f = counts.count(dev);
+    if f > 0.0 {
+        return (1.0 + f).ln();
     }
     if let Some(suf) = get_morph_suffix(dev) {
-        let stem = &dev[..dev.len() - suf.len()];
-        let stem_f = freq.get(stem).copied().unwrap_or(0);
-        if stem_f >= 5 {
-            return ((stem_f as f64).ln() + 3.5).max(0.0);
+        let stem_f = counts.count(&dev[..dev.len() - suf.len()]);
+        if stem_f >= 5.0 {
+            return (stem_f.ln() + 3.5).max(0.0);
         }
     }
     0.0
@@ -307,12 +357,10 @@ pub fn extract_dense_features(
     heur: f64,
     heur_rank: usize,
     roman: &str,
-    freq: &HashMap<String, u32>,
-    ranks: &FreqRanks,
+    counts: &dyn WordCounts,
 ) -> [f64; DENSE_DIM] {
-    let f = freq.get(&c.dev).copied().unwrap_or(0);
-    let rank_pct = ranks.rank_of.get(&c.dev).copied().unwrap_or(ranks.total) as f64
-        / ranks.total.max(1) as f64;
+    let f = counts.count(&c.dev);
+    let rank_pct = counts.rank_pct(&c.dev);
     let mut feats = [0.0f64; DENSE_DIM];
     feats[0] = c.emit;
     feats[1] = c.lm;
@@ -320,9 +368,9 @@ pub fn extract_dense_features(
     feats[3] = rank as f64;
     feats[4] = heur;
     feats[5] = heur_rank as f64;
-    feats[6] = (1.0 + f as f64).ln();
+    feats[6] = (1.0 + f).ln();
     feats[7] = rank_pct;
-    feats[8] = if f > 0 { 1.0 } else { 0.0 };
+    feats[8] = if f > 0.0 { 1.0 } else { 0.0 };
     feats[9] = c.dev.chars().count() as f64;
     let matra_total: f64 = MATRAS
         .iter()
@@ -345,7 +393,7 @@ pub fn extract_dense_features(
         .is_some_and(|ch| ch == '\u{0902}' || ch == '\u{0901}' || ch == '\u{0903}')
         as i32 as f64;
     feats[27] = roman.chars().count() as f64;
-    feats[28] = morph_effective_log_freq(&c.dev, freq);
+    feats[28] = morph_effective_log_freq(&c.dev, counts);
     feats
 }
 
@@ -560,7 +608,7 @@ pub fn rerank(
 /// sorted by `heur` ascending.
 pub fn rank_candidates<'a>(
     candidates: &'a [DecodedCandidate],
-    freq: &HashMap<String, u32>,
+    counts: &dyn WordCounts,
 ) -> (Vec<&'a DecodedCandidate>, Vec<f64>, Vec<usize>) {
     let mut order: Vec<&DecodedCandidate> = candidates.iter().collect();
     order.sort_by(|a, b| {
@@ -571,10 +619,7 @@ pub fn rank_candidates<'a>(
 
     let heur: Vec<f64> = order
         .iter()
-        .map(|c| {
-            let f = freq.get(&c.dev).copied().unwrap_or(0);
-            c.emit + LM_W * c.lm - VOCAB_W * (1.0 + f as f64).ln()
-        })
+        .map(|c| c.emit + LM_W * c.lm - VOCAB_W * (1.0 + counts.count(&c.dev)).ln())
         .collect();
 
     let mut heur_order: Vec<usize> = (0..order.len()).collect();
@@ -603,8 +648,7 @@ pub fn rerank_with_table(
     rerank_with_norm(
         roman,
         candidates,
-        freq,
-        ranks,
+        &VocabCounts { freq, ranks },
         custom_sparse_table,
         custom_sparse_scale,
         DenseNorm::compiled_in(),
@@ -633,8 +677,7 @@ pub struct LangCond<'a> {
 pub fn rerank_with_norm(
     roman: &str,
     candidates: &[DecodedCandidate],
-    freq: &HashMap<String, u32>,
-    ranks: &FreqRanks,
+    counts: &dyn WordCounts,
     custom_sparse_table: Option<&[i8]>,
     custom_sparse_scale: Option<f64>,
     norm: DenseNorm<'_>,
@@ -646,7 +689,7 @@ pub fn rerank_with_norm(
         return vec![];
     }
 
-    let (order, heur, heur_rank) = rank_candidates(candidates, freq);
+    let (order, heur, heur_rank) = rank_candidates(candidates, counts);
 
     // Raw decoder order: `order` is already sorted by emit + lm, so emitting it
     // with descending scores reproduces the generative ranking exactly.
@@ -678,7 +721,7 @@ pub fn rerank_with_norm(
             heur_std.push(norm.z(4, heur[i]));
             continue;
         }
-        let dense = extract_dense_features(c, i, heur[i], heur_rank[i], roman, freq, ranks);
+        let dense = extract_dense_features(c, i, heur[i], heur_rank[i], roman, counts);
         let aks = akshara::segment(&c.dev);
         let sparse = extract_sparse_features_lang(
             &c.dev,

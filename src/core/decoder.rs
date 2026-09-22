@@ -50,6 +50,8 @@ pub struct ModelDecoder {
     pub model: TranslitModel,
     /// Reverse index: chunk -> (akshara, weight), capped + sorted by weight.
     reverse: HashMap<String, Vec<(u32, f32)>>,
+    /// Each akshara's lexicon key bytes (`lexicon::encode_key`), by id.
+    akshara_keys: Vec<Option<Vec<u8>>>,
     /// Search / scoring configuration.
     pub config: DecoderConfig,
 }
@@ -87,6 +89,49 @@ pub struct DecodedCandidate {
     pub akshara_count: usize,
 }
 
+/// A position in a dictionary while a word is spelled out, opaque to the
+/// decoder (a trie node, or an automaton address plus accumulated output).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DictState(pub u64, pub u64);
+
+/// A dictionary the lattice can be intersected with: words spelled akshara
+/// by akshara from `root`.
+pub trait Dictionary {
+    fn root(&self) -> DictState;
+    /// Extend a prefix by one akshara; `None` if no word continues that way.
+    fn step(&self, state: DictState, akshara: u32) -> Option<DictState>;
+    /// Whether the prefix spelled so far is a whole word.
+    fn is_word(&self, state: DictState) -> bool;
+}
+
+/// The per-language lexicon automaton as a decoding dictionary.  `keys[a]`
+/// is akshara `a`'s key bytes ([`ModelDecoder::akshara_keys`]).
+pub struct LexiconDict<'a> {
+    pub lexicon: &'a crate::core::lexicon::Lexicon,
+    pub keys: &'a [Option<Vec<u8>>],
+}
+
+impl Dictionary for LexiconDict<'_> {
+    fn root(&self) -> DictState {
+        let (addr, out) = self.lexicon.root().to_raw();
+        DictState(addr, out)
+    }
+    fn step(&self, state: DictState, akshara: u32) -> Option<DictState> {
+        let key = self.keys.get(akshara as usize)?.as_deref()?;
+        let next = self.lexicon.step(
+            crate::core::lexicon::LexState::from_raw(state.0, state.1),
+            key,
+        )?;
+        let (addr, out) = next.to_raw();
+        Some(DictState(addr, out))
+    }
+    fn is_word(&self, state: DictState) -> bool {
+        self.lexicon
+            .word_levels(crate::core::lexicon::LexState::from_raw(state.0, state.1))
+            .is_some()
+    }
+}
+
 impl ModelDecoder {
     pub fn new(model: TranslitModel) -> Self {
         Self::with_config(model, DecoderConfig::default())
@@ -113,11 +158,22 @@ impl ModelDecoder {
             v.sort_by(|a, b| a.1.total_cmp(&b.1));
             v.truncate(config.max_aksharas_per_chunk);
         }
+        let akshara_keys = model
+            .aksharas
+            .iter()
+            .map(|a| crate::core::lexicon::encode_key(a))
+            .collect();
         Self {
             model,
             reverse,
+            akshara_keys,
             config,
         }
+    }
+
+    /// Lexicon key bytes of every akshara, by id (for [`LexiconDict`]).
+    pub fn akshara_keys(&self) -> &[Option<Vec<u8>>] {
+        &self.akshara_keys
     }
 
     /// Configure the LM weight relative to emission weights (default 1.0).
@@ -309,14 +365,15 @@ impl ModelDecoder {
     /// trie.  Every edge must extend the current trie node, and only paths
     /// that end on a word (a trie terminal) are returned.
     ///
-    /// Same position-synchronous search as [`Self::decode_detailed`].  A trie
-    /// node identifies its akshara sequence, so paths in one stack recombine
-    /// by node: the cheapest segmentation of each word prefix survives.
+    /// Same position-synchronous search as [`Self::decode_detailed`], with the
+    /// same recombination by akshara sequence (a minimal automaton shares
+    /// states between different prefixes, so its state is not an identity):
+    /// the cheapest segmentation of each word prefix survives.
     pub fn decode_in_words_detailed(
         &self,
         roman: &str,
         k: usize,
-        trie: &crate::core::wordtrie::WordTrie,
+        dict: &dyn Dictionary,
     ) -> Vec<DecodedCandidate> {
         let roman = roman.to_ascii_lowercase();
         if !roman.is_ascii() {
@@ -329,7 +386,7 @@ impl ModelDecoder {
         }
         let k = k.max(1);
         // Most edges die on the trie, so a wider beam is nearly free here.
-        let width = self.config.beam_width.max(64) * 2;
+        let width = self.config.beam_width * 2;
 
         struct Hyp {
             prev2: Option<u32>,
@@ -337,8 +394,9 @@ impl ModelDecoder {
             score: f64,
             emit: f64,
             lm: f64,
+            phash: u64,
             parent: Option<u32>,
-            wnode: usize,
+            ws: DictState,
         }
         let mut arena: Vec<PathCell> = Vec::with_capacity(256);
         let mut stacks: Vec<Vec<Hyp>> = (0..=m).map(|_| Vec::new()).collect();
@@ -348,12 +406,13 @@ impl ModelDecoder {
             score: 0.0,
             emit: 0.0,
             lm: 0.0,
+            phash: 0,
             parent: None,
-            wnode: 0,
+            ws: dict.root(),
         });
         let prune = |stack: &mut Vec<Hyp>| {
-            stack.sort_unstable_by(|a, b| a.wnode.cmp(&b.wnode).then(a.score.total_cmp(&b.score)));
-            stack.dedup_by_key(|h| h.wnode);
+            stack.sort_unstable_by(|a, b| a.phash.cmp(&b.phash).then(a.score.total_cmp(&b.score)));
+            stack.dedup_by_key(|h| h.phash);
             if stack.len() > width {
                 stack.select_nth_unstable_by(width, |a, b| a.score.total_cmp(&b.score));
                 stack.truncate(width);
@@ -378,7 +437,7 @@ impl ModelDecoder {
                     None => None,
                 };
                 for &e in &edges_by_pos[pos] {
-                    let Some(wn) = trie.child(h.wnode, e.a) else {
+                    let Some(ws) = dict.step(h.ws, e.a) else {
                         continue;
                     };
                     let fluency = match (h.prev2, h.prev) {
@@ -397,19 +456,20 @@ impl ModelDecoder {
                         score: emit + lm * self.config.lm_weight,
                         emit,
                         lm,
+                        phash: path_hash(h.phash, e.a),
                         parent: path,
-                        wnode: wn,
+                        ws,
                     });
                 }
             }
         }
 
         let mut done = std::mem::take(&mut stacks[m]);
-        done.sort_unstable_by(|a, b| a.wnode.cmp(&b.wnode).then(a.score.total_cmp(&b.score)));
-        done.dedup_by_key(|h| h.wnode);
+        done.sort_unstable_by(|a, b| a.phash.cmp(&b.phash).then(a.score.total_cmp(&b.score)));
+        done.dedup_by_key(|h| h.phash);
         let mut out: Vec<DecodedCandidate> = Vec::new();
         for h in done {
-            let (Some(last), Some(_)) = (h.prev, trie.freq(h.wnode)) else {
+            let Some(last) = h.prev.filter(|_| dict.is_word(h.ws)) else {
                 continue;
             };
             arena.push(PathCell {
@@ -440,7 +500,7 @@ impl ModelDecoder {
         &self,
         roman: &str,
         k: usize,
-        trie: Option<&crate::core::wordtrie::WordTrie>,
+        trie: Option<&dyn Dictionary>,
     ) -> Vec<DecodedCandidate> {
         let trie_only = crate::core::ablation::trie_only() && trie.is_some();
         let mut cands = if trie_only {

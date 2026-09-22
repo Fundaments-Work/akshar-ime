@@ -28,11 +28,14 @@ pub const UNIFIED_MAGIC: [u8; 4] = *b"AKSH";
 ///   v6  adds `dense_weights` (jointly-trained dense reranker weights, 29 elems)
 ///   v7  adds the language list and per-language dense reranker weights
 ///       (language-conditioned ranking; see `reranker::LangCond`)
+///   v8  adds the per-language lexicon automaton (`core::lexicon`), which
+///       replaces `vocab_freq` (left empty) as frequency source and dictionary
 ///
-/// v1-v6 still load (bigrams dropped; v4 falls back to the compiled-in
+/// v1-v7 still load (bigrams dropped; v4 falls back to the compiled-in
 /// normalisation constants; v5 loads with empty dense_weights; v6 loads with
-/// no languages, i.e. language-blind ranking). v7 is what `save` writes.
-pub const UNIFIED_VERSION: u32 = 7;
+/// no languages, i.e. language-blind ranking; v7 with no lexicon). v8 is what
+/// `save` writes.
+pub const UNIFIED_VERSION: u32 = 8;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct UnifiedModel {
@@ -77,6 +80,10 @@ pub struct UnifiedModel {
     /// use `gamma_auto`.
     #[serde(default)]
     pub gamma_lang: Vec<f64>,
+    /// Per-language word frequencies as one automaton (v8); when present it
+    /// supersedes `vocab_freq`.
+    #[serde(default)]
+    pub lexicon: Option<crate::core::lexicon::LexiconData>,
 }
 
 /// The v1 container layout, kept only so existing `akshar.model` files still
@@ -110,6 +117,7 @@ impl From<UnifiedModelV1> for UnifiedModel {
             dense_lang_weights: Vec::new(),
             gamma_auto: None,
             gamma_lang: Vec::new(),
+            lexicon: None,
         }
     }
 }
@@ -143,6 +151,7 @@ impl From<UnifiedModelV2> for UnifiedModel {
             dense_lang_weights: Vec::new(),
             gamma_auto: None,
             gamma_lang: Vec::new(),
+            lexicon: None,
         }
     }
 }
@@ -203,6 +212,7 @@ impl UnifiedModel {
             dense_lang_weights: Vec::new(),
             gamma_auto: None,
             gamma_lang: Vec::new(),
+            lexicon: None,
         }
     }
 
@@ -215,6 +225,7 @@ impl UnifiedModel {
         let version =
             peek_version(bytes).ok_or("Invalid magic header: not an Akshar unified model")?;
         let mut model: Self = match version {
+            8 => bincode::deserialize::<UnifiedModelV8>(bytes)?.try_into()?,
             7 => bincode::deserialize::<UnifiedModelV7>(bytes)?.try_into()?,
             6 => bincode::deserialize::<UnifiedModelV6>(bytes)?.try_into()?,
             5 => bincode::deserialize::<UnifiedModelV5>(bytes)?.try_into()?,
@@ -253,6 +264,7 @@ impl UnifiedModel {
                     dense_lang_weights: Vec::new(),
                     gamma_auto: None,
                     gamma_lang: Vec::new(),
+                    lexicon: None,
                 }
             }
             2 => bincode::deserialize::<UnifiedModelV2>(bytes)?.into(),
@@ -269,12 +281,12 @@ impl UnifiedModel {
     pub fn save(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         let f = File::create(path)?;
         let mut writer = BufWriter::new(f);
-        bincode::serialize_into(&mut writer, &UnifiedModelV7::from(self))?;
+        bincode::serialize_into(&mut writer, &UnifiedModelV8::from(self))?;
         Ok(())
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        Ok(bincode::serialize(&UnifiedModelV7::from(self))?)
+        Ok(bincode::serialize(&UnifiedModelV8::from(self))?)
     }
 
     pub fn validate(&self) -> bool {
@@ -282,7 +294,7 @@ impl UnifiedModel {
             && (1..=UNIFIED_VERSION).contains(&self.version)
             && self.translit.validate()
             && !self.sparse_reranker_table.is_empty()
-            && !self.vocab_freq.is_empty()
+            && (!self.vocab_freq.is_empty() || self.lexicon.is_some())
     }
 }
 
@@ -404,6 +416,7 @@ impl TryFrom<UnifiedModelV4> for UnifiedModel {
             dense_lang_weights: Vec::new(),
             gamma_auto: None,
             gamma_lang: Vec::new(),
+            lexicon: None,
         })
     }
 }
@@ -490,6 +503,35 @@ impl TryFrom<UnifiedModelV7> for UnifiedModel {
     }
 }
 
+// ---------------------------------------------------------------------------
+// v8: v7 fields plus the per-language lexicon automaton
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize)]
+struct UnifiedModelV8 {
+    v7: UnifiedModelV7,
+    lexicon: Option<crate::core::lexicon::LexiconData>,
+}
+
+impl From<&UnifiedModel> for UnifiedModelV8 {
+    fn from(m: &UnifiedModel) -> Self {
+        Self {
+            v7: UnifiedModelV7::from(m),
+            lexicon: m.lexicon.clone(),
+        }
+    }
+}
+
+impl TryFrom<UnifiedModelV8> for UnifiedModel {
+    type Error = Box<dyn std::error::Error>;
+
+    fn try_from(v: UnifiedModelV8) -> Result<Self, Self::Error> {
+        let mut m = UnifiedModel::try_from(v.v7)?;
+        m.lexicon = v.lexicon;
+        Ok(m)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -536,6 +578,20 @@ mod tests {
         let old = UnifiedModel::from_bytes(&v6).unwrap();
         assert!(old.langs.is_empty() && old.dense_lang_weights.is_empty());
         assert_eq!(old.dense_weights, vec![1.0; 3]);
+    }
+
+    #[test]
+    fn v8_round_trips_the_lexicon() {
+        let mut m = tiny_model();
+        let lex = crate::core::lexicon::Lexicon::build(
+            vec!["hin".into()],
+            vec![("क".to_string(), [9, 0, 0, 0, 0, 0, 0, 0])],
+        )
+        .unwrap();
+        m.lexicon = Some(lex.to_data());
+        let back = UnifiedModel::from_bytes(&m.to_bytes().unwrap()).unwrap();
+        let back = crate::core::lexicon::Lexicon::from_data(back.lexicon.unwrap()).unwrap();
+        assert_eq!(back.level("क", Some(0)), 9);
     }
 
     /// v2 bytes (as written before the compact encoding landed) must still read.

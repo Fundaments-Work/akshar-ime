@@ -4,12 +4,12 @@
 // Ingests training data (word pairs + text) and directly produces
 // a single, low-size, production-ready `akshar.model` artifact.
 
-use akshar_ime::core::decoder::{DecoderConfig, ModelDecoder};
+use akshar_ime::core::decoder::{DecoderConfig, Dictionary, LexiconDict, ModelDecoder};
 use akshar_ime::core::em_trainer::{Trainer, TrainerConfig};
 use akshar_ime::core::holdout::{is_holdout, DEFAULT_HOLDOUT_DENOM};
 use akshar_ime::core::reranker::{
-    extract_dense_features, extract_sparse_features_lang, rank_candidates, FreqRanks, DENSE_DIM,
-    HASH_SIZE,
+    extract_dense_features, extract_sparse_features_lang, rank_candidates, FreqRanks,
+    LexiconCounts, VocabCounts, WordCounts, DENSE_DIM, HASH_SIZE,
 };
 use akshar_ime::core::reranker_weights::{MEAN_DENSE, STD_DENSE, W_DENSE};
 
@@ -196,6 +196,8 @@ fn main() -> Result<()> {
     let mut rerank_holdout = true;
     let mut min_akshara_count: u32 = 2;
     let mut em_cache: Option<PathBuf> = None;
+    let mut lexicon_path: Option<PathBuf> = None;
+    let mut use_lexicon = true;
     // Attestation weighting (Roark/Dakshina §4.2 pattern): weight each EM/LM
     // pair by log-dampened corpus frequency of its Devanagari side, so
     // dominant romanization conventions dominate training. Off = all weights
@@ -264,6 +266,10 @@ fn main() -> Result<()> {
             "--em-cache" => {
                 em_cache = Some(PathBuf::from(args.next().context("value for --em-cache")?))
             }
+            "--lexicon" => {
+                lexicon_path = Some(PathBuf::from(args.next().context("value for --lexicon")?))
+            }
+            "--no-lexicon" => use_lexicon = false,
             "--min-akshara-count" => {
                 min_akshara_count = args
                     .next()
@@ -289,6 +295,8 @@ fn main() -> Result<()> {
                 println!("  --no-rerank-holdout     Let EM/LM see the reranker's own pairs (old behaviour)");
                 println!("  --min-akshara-count <n> Keep aksharas seen >= n times in training (default: 2)");
                 println!("  --em-cache <path>       Reuse/save the EM+LM model for this exact data split");
+                println!("  --lexicon <path>        Per-language lexicon (build_lexicon; default data/lexicon.bin)");
+                println!("  --no-lexicon            Use the single-corpus vocabulary instead (v7 behaviour)");
                 return Ok(());
             }
             other => {
@@ -543,12 +551,36 @@ fn main() -> Result<()> {
         translit_model.chunks.len()
     );
 
-    // Phase 2: vocab
+    // Phase 2: word knowledge.  The per-language lexicon (build_lexicon) is
+    // both the frequency source and the decoding dictionary; without one the
+    // vocabulary is counted from the single running-text corpus as before.
     println!("\n[Phase 2/4] Compiling Vocabulary & Empirical Frequencies...");
     let vocab_t0 = Instant::now();
+    let lexicon_path = lexicon_path
+        .or_else(|| Some(PathBuf::from("data/lexicon.bin")).filter(|p| p.exists()))
+        .filter(|_| use_lexicon);
+    let lexicon: Option<akshar_ime::core::lexicon::Lexicon> = match &lexicon_path {
+        Some(p) => {
+            let bytes = std::fs::read(p).with_context(|| format!("read {}", p.display()))?;
+            let (data, _tokens): (akshar_ime::core::lexicon::LexiconData, Vec<u64>) =
+                bincode::deserialize(&bytes).context("parse lexicon")?;
+            let lex = akshar_ime::core::lexicon::Lexicon::from_data(data)
+                .map_err(|e| anyhow::anyhow!("lexicon automaton: {e}"))?;
+            println!(
+                "Lexicon {}: {} words in {} languages ({}).",
+                p.display(),
+                lex.len(),
+                lex.langs().len(),
+                lex.langs().join(", ")
+            );
+            Some(lex)
+        }
+        None => None,
+    };
     // Reuse the attestation pre-pass map when present (same implementation,
     // zero re-stream); otherwise count as before.
     let mut vocab_freq: HashMap<String, u32> = match attest_freq {
+        _ if lexicon.is_some() => HashMap::new(),
         Some(freq) => {
             println!("Reusing Phase-0 corpus counts for the vocabulary.");
             freq
@@ -610,9 +642,31 @@ fn main() -> Result<()> {
 
     // Decode one pair into a training list; None when the gold is not among
     // the candidates (nothing to learn from).
+    let lexicon_dict = lexicon.as_ref().map(|lexicon| LexiconDict {
+        lexicon,
+        keys: decoder.akshara_keys(),
+    });
+    let dict: &(dyn Dictionary + Sync) = match &lexicon_dict {
+        Some(d) => d,
+        None => &word_trie,
+    };
+    let vocab_counts = VocabCounts {
+        freq: &vocab_freq,
+        ranks: &ranks,
+    };
     let decode_item = |roman: &str, gold: &str, lang: Option<u8>| -> Option<RerankItem> {
-        let cands = decoder.decode_union(roman, RERANK_DECODE_DEPTH, Some(&word_trie));
-        let (order, heur, heur_rank) = rank_candidates(&cands, &vocab_freq);
+        // Frequencies in the pair's language (or best of all when it was
+        // dropped), exactly as the engine will see them.
+        let lexicon_counts = lexicon.as_ref().map(|lexicon| LexiconCounts {
+            lexicon,
+            lang: lang.and_then(|l| lexicon.lang_index(&langs[usize::from(l)])),
+        });
+        let counts: &dyn WordCounts = match &lexicon_counts {
+            Some(c) => c,
+            None => &vocab_counts,
+        };
+        let cands = decoder.decode_union(roman, RERANK_DECODE_DEPTH, Some(dict));
+        let (order, heur, heur_rank) = rank_candidates(&cands, counts);
         let target_idx = order.iter().position(|c| c.dev == gold)?;
         let sparse = order
             .iter()
@@ -631,15 +685,7 @@ fn main() -> Result<()> {
             .iter()
             .enumerate()
             .map(|(idx, c)| {
-                extract_dense_features(
-                    c,
-                    idx,
-                    heur[idx],
-                    heur_rank[idx],
-                    roman,
-                    &vocab_freq,
-                    &ranks,
-                )
+                extract_dense_features(c, idx, heur[idx], heur_rank[idx], roman, counts)
             })
             .collect();
         Some(RerankItem {
@@ -1067,6 +1113,7 @@ fn main() -> Result<()> {
     unified.dense_weights = dense_weights;
     unified.langs = langs;
     unified.dense_lang_weights = weights.lang;
+    unified.lexicon = lexicon.as_ref().map(|l| l.to_data());
     unified
         .save(&out_path)
         .map_err(|e| anyhow::anyhow!("save unified model: {e}"))?;

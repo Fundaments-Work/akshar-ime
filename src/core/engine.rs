@@ -166,8 +166,11 @@ pub struct ImeEngine {
     /// per language; `None` / empty fall back to the compiled default.
     gamma_auto: Option<f64>,
     gamma_lang: Vec<f64>,
-    /// W3: Candidate Union word trie over vocabulary.
+    /// W3: Candidate Union word trie over vocabulary (v1-v7 models).
     word_trie: Option<crate::core::wordtrie::WordTrie>,
+    /// Per-language lexicon (v8): the frequency source and the decoding
+    /// dictionary, replacing `reranker_data` and `word_trie`.
+    lexicon: Option<crate::core::lexicon::Lexicon>,
     pub trie: Trie,
     pub context_model: ContextModel,
     pub symspell: SymSpell,
@@ -229,6 +232,7 @@ impl ImeEngine {
             gamma_auto: None,
             gamma_lang: Vec::new(),
             word_trie,
+            lexicon: None,
             trie: Trie::new(),
             context_model: ContextModel::new(CONTEXT_WINDOW_SIZE),
             symspell: SymSpell::default(),
@@ -263,17 +267,31 @@ impl ImeEngine {
                 ..DecoderConfig::default()
             },
         );
-        let reranker = load_reranker().with_freq(Some(unified.vocab_freq.clone()));
-        let ranks = crate::core::reranker::FreqRanks::from_freq_map(&unified.vocab_freq);
-        let word_trie = Some(crate::core::wordtrie::WordTrie::from_freq_map(
-            &unified.vocab_freq,
-            &|a| decoder.model.akshara_id(a),
-            1,
-        ));
-        let reranker_data = Some(crate::core::reranker::RerankerData {
-            freq: unified.vocab_freq,
-            ranks,
-        });
+        // v8 carries the per-language lexicon automaton: it is the frequency
+        // source and the decoding dictionary, so none of the older in-memory
+        // structures (a HashMap vocabulary, its rank map and a HashMap-per-node
+        // word trie -- ~300 MB of RAM for 470k words) is built.  A lexicon that
+        // fails to parse falls back to them.
+        let lexicon = unified
+            .lexicon
+            .take()
+            .and_then(|data| crate::core::lexicon::Lexicon::from_data(data).ok());
+        let (reranker, word_trie, reranker_data) = if lexicon.is_some() {
+            (load_reranker(), None, None)
+        } else {
+            let reranker = load_reranker().with_freq(Some(unified.vocab_freq.clone()));
+            let ranks = crate::core::reranker::FreqRanks::from_freq_map(&unified.vocab_freq);
+            let word_trie = crate::core::wordtrie::WordTrie::from_freq_map(
+                &unified.vocab_freq,
+                &|a| decoder.model.akshara_id(a),
+                1,
+            );
+            let data = crate::core::reranker::RerankerData {
+                freq: unified.vocab_freq,
+                ranks,
+            };
+            (reranker, Some(word_trie), Some(data))
+        };
         Self {
             decoder,
             reranker,
@@ -287,6 +305,7 @@ impl ImeEngine {
             gamma_auto: unified.gamma_auto,
             gamma_lang: std::mem::take(&mut unified.gamma_lang),
             word_trie,
+            lexicon,
             trie: Trie::new(),
             context_model: ContextModel::new(CONTEXT_WINDOW_SIZE),
             symspell: SymSpell::default(),
@@ -383,6 +402,7 @@ impl ImeEngine {
             gamma_auto: None,
             gamma_lang: Vec::new(),
             word_trie,
+            lexicon: None,
             trie: Trie::new(),
             context_model: ContextModel::new(CONTEXT_WINDOW_SIZE),
             symspell: SymSpell::new(MAX_EDIT_DISTANCE),
@@ -588,15 +608,51 @@ impl ImeEngine {
         let mut fresh_scores: HashMap<String, u64> = HashMap::new();
         if let Some(qv) = query_variants.first() {
             let roman = qv.roman.as_str();
-            let cands =
-                self.decoder
-                    .decode_union(roman, (count * 4).max(50), self.word_trie.as_ref());
-            let ranked: Vec<(String, f64)> = match &self.reranker_data {
-                Some(data) => crate::core::reranker::rerank_with_norm(
+            // The dictionary to intersect the lattice with, and what the
+            // ranker knows about word frequency: the lexicon (v8, in the
+            // query's language or best of all), else the legacy vocabulary.
+            let lexicon_dict =
+                self.lexicon
+                    .as_ref()
+                    .map(|lexicon| crate::core::decoder::LexiconDict {
+                        lexicon,
+                        keys: self.decoder.akshara_keys(),
+                    });
+            let dict: Option<&dyn crate::core::decoder::Dictionary> = match &lexicon_dict {
+                Some(d) => Some(d),
+                None => self
+                    .word_trie
+                    .as_ref()
+                    .map(|t| t as &dyn crate::core::decoder::Dictionary),
+            };
+            let lexicon_counts =
+                self.lexicon
+                    .as_ref()
+                    .map(|lexicon| crate::core::reranker::LexiconCounts {
+                        lexicon,
+                        lang: self
+                            .language
+                            .and_then(|l| lexicon.lang_index(&self.langs[l])),
+                    });
+            let vocab_counts =
+                self.reranker_data
+                    .as_ref()
+                    .map(|d| crate::core::reranker::VocabCounts {
+                        freq: &d.freq,
+                        ranks: &d.ranks,
+                    });
+            let counts: Option<&dyn crate::core::reranker::WordCounts> = match &lexicon_counts {
+                Some(c) => Some(c),
+                None => vocab_counts
+                    .as_ref()
+                    .map(|c| c as &dyn crate::core::reranker::WordCounts),
+            };
+            let cands = self.decoder.decode_union(roman, (count * 4).max(50), dict);
+            let ranked: Vec<(String, f64)> = match counts {
+                Some(counts) => crate::core::reranker::rerank_with_norm(
                     roman,
                     &cands,
-                    &data.freq,
-                    &data.ranks,
+                    counts,
                     self.sparse_table.as_deref(),
                     Some(self.sparse_scale),
                     crate::core::reranker::DenseNorm::from_model(&self.dense_mean, &self.dense_std),
@@ -1097,6 +1153,7 @@ mod tests {
             gamma_auto: None,
             gamma_lang: Vec::new(),
             word_trie: None,
+            lexicon: None,
             trie: Trie::new(),
             context_model: ContextModel::new(3),
             symspell: SymSpell::new(2),

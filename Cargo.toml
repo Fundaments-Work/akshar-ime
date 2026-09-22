@@ -111,6 +111,10 @@ name = "calibrate_blend"
 path = "src/bin/build/calibrate_blend.rs"
 
 [[bin]]
+name = "build_lexicon"
+path = "src/bin/build/build_lexicon.rs"
+
+[[bin]]
 name = "build_wordfreq_text"
 path = "src/bin/build/build_wordfreq_text.rs"
 

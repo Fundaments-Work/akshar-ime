@@ -90,3 +90,20 @@ impl WordTrie {
         trie
     }
 }
+
+impl crate::core::decoder::Dictionary for WordTrie {
+    fn root(&self) -> crate::core::decoder::DictState {
+        crate::core::decoder::DictState(0, 0)
+    }
+    fn step(
+        &self,
+        state: crate::core::decoder::DictState,
+        akshara: u32,
+    ) -> Option<crate::core::decoder::DictState> {
+        self.child(state.0 as usize, akshara)
+            .map(|n| crate::core::decoder::DictState(n as u64, 0))
+    }
+    fn is_word(&self, state: crate::core::decoder::DictState) -> bool {
+        self.freq(state.0 as usize).is_some()
+    }
+}

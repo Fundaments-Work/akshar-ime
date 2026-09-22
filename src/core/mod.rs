@@ -7,6 +7,7 @@ pub mod decoder;
 pub mod em_trainer;
 pub mod engine;
 pub mod holdout;
+pub mod lexicon;
 pub mod normalizer;
 pub mod reranker;
 pub mod reranker_weights;
