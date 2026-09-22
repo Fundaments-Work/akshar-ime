@@ -177,17 +177,16 @@ engine.user_confirms("namaste", "नमस्ते");
 ## Use from the browser
 
 ```sh
-make wasm           # builds wasm/pkg + the JS wrapper
-make wasm-serve     # serves the demo at http://localhost:8000/web/
+make wasm-serve     # builds the playground, serves at http://localhost:8000/
 ```
 
 ```js
-import { AksharIME } from './js/akshar-ime.js';
-await AksharIME.init({ modelUrl: '/data/akshar_wasm.model' });
+import { AksharIME } from './vendor/js/akshar-ime.js';
+await AksharIME.init({ modelUrl: './models/akshar_wasm.model' });
 AksharIME.attach(document.querySelector('input'));
 ```
 
-See Chapter 10 for deployment detail.
+See Chapter 10 for deployment detail (`apps/playground/`, Cloudflare-ready).
 
 \newpage
 
@@ -1446,22 +1445,24 @@ Learned state persists to the user's data directory (`src/persistence.rs`);
 ## Browser / WebAssembly
 
 ```sh
-make wasm            # wasm/pkg + JS wrapper
-make wasm-serve      # demo on :8000
+make wasm-serve         # builds + serves the playground on :8000
+make playground-deploy  # deploys apps/playground/ to Cloudflare Workers
 ```
 
 ```js
-import { AksharIME } from './js/akshar-ime.js';
-await AksharIME.init({ modelUrl: '/data/akshar_wasm.model' });
+import { AksharIME } from './vendor/js/akshar-ime.js';
+await AksharIME.init({ modelUrl: './models/akshar_wasm.model' });
 AksharIME.attach(document.querySelector('input'));
 ```
-The wrapper (`js/akshar-ime.js`) calls `createEngine(modelUrl, lexiconUrl,
-rerankerUrl)` from `wasm/pkg/akshar_ime.js` (raw factory
+The wrapper (`packages/engine-js/akshar-ime.js`) calls `createEngine(modelUrl, lexiconUrl,
+rerankerUrl)` from `packages/engine-wasm/pkg/akshar_ime.js` (raw factory
 `createEngineFromModelUrl` — see `src/wasm.rs`); its engine object exposes
 `getSuggestions`, `confirm`, `export_state`/`import_state`.
 
 Serve `akshar_wasm.model` with `Content-Encoding: br` and a long cache lifetime;
-it is 4.94 MB compressed and immutable.
+it is 4.94 MB compressed and immutable. On Cloudflare it lives in R2 with its
+public URL baked into `apps/playground/public/config.js` at build time
+(`MODEL_URL=… make playground-build`); see `apps/playground/README.md`.
 
 `WasmEngine::from_bytes(model, lexicon, weights)` retains its `lexicon`
 parameter as an ignored no-op so existing callers keep working. Pass `null`.

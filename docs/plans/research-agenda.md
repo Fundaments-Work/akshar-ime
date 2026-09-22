@@ -68,13 +68,21 @@ ranker), 46% gold-absent-from-50. Attenuation/demotion/router all parked.
 Remaining: attestation-weighted or entity-upsampled training (`train-mid`,
 ~40 min machine time). Log: `plans/archive/2026-09-22-ne-routing.md`.
 
-### 5. Attestation-weighted training pairs (data-side, cheap)
+### 5. Attestation-weighted training pairs — KILLED 2026-09-22
+
+`train-mid-att`: entities +13, native −8, pooled +5 (all noise). Frequency
+weights teach frequent conventions including frequent mistakes (dhanyabad
+→ धन्यबाद observed). Left open: entity-upsampled EM (weight by
+entity-ness — the opposite direction) and multi-ref-aware reranker loss.
+Log: `plans/archive/2026-09-22-attestation-training.md`.
 
 Source: `sota-signals.md` T4 (Roark §4.2). Weight EM/reranker pairs by
 variant attestation instead of uniform — teaches which romanization
 conventions dominate, attacks the oracle@2 tie class. Multi-ref-aware
 reranker loss (any attested variant counts).
 Kill: no valid movement after a `train-mid`; costs one training run to test.
+OUTCOME: killed (see header) — frequency weighting teaches frequent
+mistakes too; entity-upsampling (opposite direction) still open.
 
 ### 6. Goto-style source-context + segmentation features (after #2)
 

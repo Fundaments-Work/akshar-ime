@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="description" content="Akshar IME playground — type Roman, write Devanagari. Free, offline, private." />
+  <title>Akshar IME — Devanagari Playground</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, Segoe UI, sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1rem; line-height: 1.6; color: #111827; }
+    h1 { font-size: 1.8rem; margin-bottom: .2rem; }
+    .sub { color: #6b7280; margin-bottom: 1.5rem; }
+    label { display: block; font-weight: 600; margin: 1.2rem 0 .4rem; }
+    input, textarea { width: 100%; padding: 10px 12px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 16px; }
+    textarea { min-height: 110px; }
+    .doc { border: 1px solid #d1d5db; border-radius: 8px; padding: 12px 14px; min-height: 220px; font-size: 17px; line-height: 1.8; }
+    .doc:focus { outline: 2px solid #111827; outline-offset: -1px; }
+    .toolbar { display: flex; gap: 8px; align-items: center; margin-top: .6rem; flex-wrap: wrap; }
+    .toolbar button { padding: 6px 12px; border-radius: 6px; border: 1px solid #d1d5db; background: #fff; cursor: pointer; font-size: 14px; }
+    .toolbar button:hover { background: #f3f4f6; }
+    .hint { font-size: 13px; color: #6b7280; margin-top: .3rem; }
+    .status { margin: 1rem 0; padding: 10px 12px; border-radius: 8px; background: #f9fafb; border: 1px solid #e5e7eb; font-size: 13px; }
+    .status.ok { background: #ecfdf5; border-color: #a7f3d0; }
+    .status.err { background: #fef2f2; border-color: #fecaca; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #111827; color: #fff; font-size: 12px; }
+    code { background: #f3f4f6; padding: 2px 6px; border-radius: 4px; font-size: 13px; }
+    pre { background: #111827; color: #e5e7eb; padding: 12px; border-radius: 8px; overflow: auto; font-size: 13px; }
+    footer { margin: 2.5rem 0 1rem; font-size: 13px; color: #6b7280; border-top: 1px solid #e5e7eb; padding-top: 1rem; }
+    @media (prefers-color-scheme: dark) {
+      body { background: #0b0e14; color: #e5e7eb; }
+      input, textarea { background: #111827; color: #e5e7eb; border-color: #374151; }
+      .doc { border-color: #374151; }
+      .toolbar button { background: #111827; color: #e5e7eb; border-color: #374151; }
+      .toolbar button:hover { background: #1f2937; }
+      .status { background: #111827; border-color: #374151; }
+      code { background: #1f2937; }
+      footer { border-color: #374151; }
+    }
+  </style>
+</head>
+<body>
+  <h1>अक्षर Akshar IME <span class="pill">playground</span></h1>
+  <p class="sub">Type in Roman, get Devanagari suggestions — fully offline, in your browser. Nothing you type leaves this page. Press <code>Enter</code>/<code>Tab</code> or <code>1-5</code> to pick, <code>↑/↓</code> to navigate.</p>
+
+  <div id="status" class="status">Loading WASM + model… (first load ~9MB, cached after)</div>
+
+  <label for="demo-input">Try a word (namaste, dhanyabad, pustak, mero naam)</label>
+  <input id="demo-input" data-akshar placeholder="type roman here… e.g. namaste" autocomplete="off" spellcheck="false" />
+
+  <label for="demo-doc">Write here — a full document, transliterated as you type</label>
+  <div id="demo-doc" data-akshar contenteditable="true">Click here and type — e.g. <i>ma timilai maya garchu</i></div>
+  <div class="toolbar">
+    <button id="btn-copy" type="button">Copy text</button>
+    <button id="btn-download" type="button">Download .txt</button>
+    <button id="btn-clear" type="button">Clear</button>
+    <span id="wordcount" class="hint">0 words</span>
+  </div>
+
+  <div class="grid" style="margin-top:1rem">
+    <div>
+      <label>Vocab / learned</label>
+      <div id="stats" class="hint">—</div>
+    </div>
+    <div style="text-align:right; padding-top:1.2rem">
+      <button id="btn-reset" style="padding:6px 10px; border-radius:6px; border:1px solid #d1d5db; background:#fff; cursor:pointer;">Reset learned words</button>
+      <button id="btn-export" style="padding:6px 10px; border-radius:6px; border:1px solid #d1d5db; background:#fff; cursor:pointer;">Export state</button>
+    </div>
+  </div>
+
+  <h3 style="margin-top:2rem">Add to your own site — 3 lines</h3>
+<pre><code>&lt;input data-akshar placeholder="type roman"&gt;
+&lt;script type="module"&gt;
+import { AksharIME } from './vendor/js/akshar-ime.js';
+await AksharIME.init({ modelUrl: './models/akshar_wasm.model' });
+AksharIME.autoAttach(); // attaches to all [data-akshar]
+&lt;/script&gt;</code></pre>
+
+  <p class="hint">Model: <code>akshar_wasm.model</code> — 8.91 MB, <strong>4.94 MB Brotli</strong>. The unified container bundles the transliteration model, the 470k-word vocabulary and the reranker, so no separate lexicon is needed. Learned words persist in <code>localStorage</code>.</p>
+
+  <footer>
+    <span id="engine-info">Akshar IME — Devanagari for every language that uses the script.</span>
+    Source &amp; docs: <code>apps/playground/</code> in the akshar-ime repo.
+  </footer>
+
+  <script type="module">
+    import { AksharIME } from './vendor/js/akshar-ime.js';
+    import { AKSHAR_CONFIG } from './config.js';
+
+    const status = document.getElementById('status');
+    const stats = document.getElementById('stats');
+    const doc = document.getElementById('demo-doc');
+    const wordcount = document.getElementById('wordcount');
+
+    const updateCount = () => {
+      const n = (doc.innerText || '').trim().split(/\s+/).filter(Boolean).length;
+      wordcount.textContent = `${n} word${n === 1 ? '' : 's'}`;
+    };
+    doc.addEventListener('input', updateCount);
+    updateCount();
+
+    document.getElementById('btn-copy').onclick = async () => {
+      await navigator.clipboard.writeText(doc.innerText || '');
+      wordcount.textContent += ' — copied ✓';
+      setTimeout(updateCount, 1500);
+    };
+    document.getElementById('btn-download').onclick = () => {
+      const blob = new Blob([doc.innerText || ''], { type: 'text/plain;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'akshar-doc.txt';
+      a.click();
+      URL.revokeObjectURL(a.href);
+    };
+    document.getElementById('btn-clear').onclick = () => {
+      if (confirm('Clear the document?')) { doc.innerHTML = ''; updateCount(); doc.focus(); }
+    };
+
+    try {
+      await AksharIME.init({ modelUrl: AKSHAR_CONFIG.modelUrl });
+      status.textContent = `✓ Ready — v${AksharIME.version} · vocab ${AksharIME.engine.vocabSize()} · learned ${AksharIME.engine.learnedCount()}`;
+      status.className = 'status ok';
+      document.getElementById('engine-info').textContent =
+        `Akshar IME v${AksharIME.version} · running fully offline in your browser.`;
+
+      AksharIME.autoAttach();
+
+      const updateStats = () => stats.textContent = `vocab ${AksharIME.engine.vocabSize()} · learned ${AksharIME.engine.learnedCount()} · top suggestion for "namaste": ${AksharIME.transliterate('namaste') || '—'}`;
+      updateStats();
+      setInterval(updateStats, 1200);
+
+      document.getElementById('btn-reset').onclick = () => {
+        AksharIME.engine.resetLearning();
+        updateStats();
+        status.textContent = 'Learned words cleared.';
+      };
+      document.getElementById('btn-export').onclick = () => {
+        const b64 = AksharIME.engine.exportState();
+        prompt('Copy learned state (base64):', b64.slice(0, 800) + (b64.length > 800 ? '… ('+b64.length+' chars)' : ''));
+      };
+
+      console.info('[demo] Try in console: AksharIME.getSuggestions("namaste")');
+      window.AksharIME = AksharIME;
+    } catch (e) {
+      console.error(e);
+      status.textContent = '✗ Failed to load: ' + (e.message || e);
+      status.className = 'status err';
+      status.innerHTML += '<br><span class="hint">Local dev: run <code>make wasm-serve</code> at the repo root, then open the printed URL. Deploy: see <code>apps/playground/README.md</code> (model URL is baked into <code>config.js</code> at build time).</span>';
+    }
+  </script>
+</body>
+</html>

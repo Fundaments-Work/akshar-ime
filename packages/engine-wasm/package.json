@@ -7,10 +7,10 @@
   "types": "./pkg/akshar_ime.d.ts",
   "files": [
     "pkg/",
-    "../js/akshar-ime.js",
-    "../web/index.html",
-    "../docs/WASM.md",
-    "../README.md"
+    "../engine-js/akshar-ime.js",
+    "../../apps/playground/public/index.html",
+    "../../docs/MANUAL.md",
+    "../../README.md"
   ],
   "keywords": ["devanagari", "ime", "transliteration", "wasm", "input-method"],
   "license": "MIT",
@@ -21,7 +21,7 @@
   "scripts": {
     "build": "./build.sh",
     "build:wasm": "cargo build --target wasm32-unknown-unknown --features wasm --release && wasm-bindgen --target web --out-dir pkg --out-name akshar_ime ../../target/wasm32-unknown-unknown/release/akshar_ime.wasm",
-    "demo": "python -m http.server 8000"
+    "demo": "make -C ../../ wasm-serve"
   },
   "sideEffects": false
 }

@@ -1,6 +1,6 @@
 # AGENTS.md — Akshar Devanagari IME
 
-Rust crate `akshar_ime` (lib entry `src/lib.rs`, public API `ImeEngine::get_suggestions` / `user_confirms`) + C IBus engine (`src/ibus_engine.c`) + wasm/browser demo (`wasm/`, `js/`, `web/`). Module map: `src/core/` (decoder, engine, reranker, LM, unified container), `src/fuzzy/`, `src/learning.rs`, `src/persistence.rs`, `src/c_api.rs` (native only), `src/wasm.rs` (`wasm` feature only).
+Rust crate `akshar_ime` (lib entry `src/lib.rs`, public API `ImeEngine::get_suggestions` / `user_confirms`) + C IBus engine (`src/ibus_engine.c`) + wasm/browser demo (`packages/engine-wasm`, `packages/engine-js`, `apps/playground`). Module map: `src/core/` (decoder, engine, reranker, LM, unified container), `src/fuzzy/`, `src/learning.rs`, `src/persistence.rs`, `src/c_api.rs` (native only), `src/wasm.rs` (`wasm` feature only).
 
 ## Commands (use the Makefile, not raw cargo)
 

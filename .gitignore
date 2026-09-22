@@ -12,6 +12,11 @@ dist
 *.bak
 .zcode/
 
+# Generated playground assembly (built by apps/playground/build.sh).
+apps/playground/public/vendor/
+apps/playground/public/models/
+apps/playground/public/config.js
+
 # All data lives under data/ (corpora, raw text, pipeline code+store, built
 # model artifacts) and is never tracked.  Only data/README.md is tracked.
 # See data/README.md for what belongs where and how to build it.

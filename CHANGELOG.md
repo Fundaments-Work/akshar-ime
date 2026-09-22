@@ -47,7 +47,6 @@ of `user_confirms` (sets prev, clears the prev-dependent suggestion cache).
   entity features, not weight.
 
 ### Morphology union table (infrastructure; nil accuracy on valid)
-
 - `MORPH_SUFFIXES` 34 → 164: Snowball Hindi port (BSD, provenance comments)
   + longest-first ordering (fixes old first-match mis-strips) + consonant
   gate for leading-implicit-a forms (`akshara::is_consonant`); unit-pinned
@@ -56,6 +55,25 @@ of `user_confirms` (sets prev, clears the prev-dependent suggestion cache).
   13 rescuable valid-native misses, mostly via the old 34 — Nepali/Marathi
   transcription cancelled on cost/benefit. Table stays as zero-cost gated
   data; future retrains train sparse template 5 on the new firings.
+
+### Attestation-weighted training (flag; killed as ship candidate)
+
+- `train --attestation` (`make train-mid-att`): log-dampened corpus-frequency
+  EM/LM pair weights through the pre-existing `add_pair_weighted` path
+  (integer weights keep KN valid); reranker sampling uniform; output to a
+  non-default artifact only. `train-mid` run: entities +13 combined, native
+  −8, pooled +5 (noise) — killed per criterion. Log:
+  `plans/archive/2026-09-22-attestation-training.md`.
+
+### Playground (Cloudflare-ready) + web reorg
+
+- `web/` + `js/` + `wasm/` reorganized to `apps/playground/` +
+  `packages/engine-js` + `packages/engine-wasm` (git-mv, history kept).
+- Playground: full-page writing surface (word count, copy/download/clear),
+  `config.js` model URL baked at build time, `wrangler.toml` (Workers
+  Static Assets) + R2 model flow, `make playground-build` /
+  `playground-deploy` / updated `wasm-serve`. Verified serving locally
+  (all assets 200). See `apps/playground/README.md`.
 
 ### Correctness fixes + pipeline repair (2026-09-10)
 

@@ -264,24 +264,32 @@ reset-learning:  ## Delete the user's learned dictionary (start fresh).
 	@rm -f $${XDG_CONFIG_HOME:-$$HOME/.config}/akshar-devanagari/user_dictionary.bin
 	@echo "Done."
 
-wasm:  ## Build WASM package (wasm/pkg + JS wrapper).
+wasm:  ## Build WASM package (packages/engine-wasm/pkg).
 	@echo "Building WASM package..."
-	@bash wasm/build.sh
+	@bash packages/engine-wasm/build.sh
 
 wasm-clean:  ## Remove WASM build artifacts.
 	@echo "Cleaning WASM artifacts..."
-	@rm -rf wasm/pkg
+	@rm -rf packages/engine-wasm/pkg apps/playground/public/vendor apps/playground/public/models apps/playground/public/config.js
 
-wasm-serve: wasm  ## Build WASM and serve demo at http://localhost:PORT/web/ (default 8000)
+playground-build: wasm  ## Assemble the deployable playground (apps/playground/public/).
+	@echo "Assembling playground..."
+	@bash apps/playground/build.sh
+
+playground-deploy: playground-build  ## Deploy the playground to Cloudflare Workers.
+	@echo "Deploying to Cloudflare (see apps/playground/README.md for R2 setup)..."
+	@npx --yes wrangler deploy --config apps/playground/wrangler.toml
+
+wasm-serve: playground-build  ## Build playground and serve at http://localhost:PORT/ (default 8000)
 	@PORT=$${PORT:-8000}; \
 	ORIG=$$PORT; \
 	for p in $$PORT 8001 8002 8003 8004 8005 8006 8007 8008 8009 8010; do \
 	  if ! ss -tln 2>/dev/null | grep -q ":$$p " && ! ss -tln6 2>/dev/null | grep -q ":$$p "; then PORT=$$p; break; fi; \
 	done; \
 	if [ "$$PORT" != "$$ORIG" ]; then echo "Port $$ORIG in use, using $$PORT instead"; fi; \
-	echo "Serving demo at http://localhost:$$PORT/web/ (Ctrl+C to stop)"; \
+	echo "Serving playground at http://localhost:$$PORT/ (Ctrl+C to stop)"; \
 	echo "  (override with: make wasm-serve PORT=9000)"; \
-	python3 -m http.server $$PORT
+	python3 -m http.server $$PORT --directory apps/playground/public
 
 release-upload:  ## Upload locally built model artifacts to a GitHub release (TAG=vX.Y.Z required).
 	@if [ -z "$(TAG)" ]; then echo "usage: make release-upload TAG=vX.Y.Z"; exit 1; fi
