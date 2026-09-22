@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+### Shared lexicon: compaction, not cross-lingual transfer (measured, 2026-09-22)
+
+The shared automaton (previous entry) could plausibly help a low-resource
+language two ways: ranking could leak another language's frequency signal
+in, or the dictionary-constrained decode pass could surface a word as
+generatable because *some* language attested it, not necessarily the query's
+own. The first is impossible by construction (`lexicon.lang_index` resolves
+strictly per-language). The second is a real code path
+(`LexiconDict::is_word` checks only FST finality, language-blind) — so it
+was tested rather than assumed: built an isolated lexicon from only Bodo +
+Dogri's text (`examples/swap_lexicon.rs` swaps it into a copy of the shipped
+model, EM/LM/reranker weights unchanged), and diffed `eval_langs` against
+the shared 8-language original. Bodo's test hit counts were **identical**,
+935/2244 top-1 and 1270/2244 in-list@8 either way; Dogri differed by 1 and 4
+cases out of 2,000, inside one standard error. `docs/MANUAL.md` §8.7 has
+the full ablation and the likely reason (the lexicon's `count >= 2` floor is
+low enough that real Bodo vocabulary mostly clears it unassisted). The
+"Contribution and prior art" claim (§2.1) is corrected to state plainly what
+this does and does not show, rather than leaving the transfer question
+open for a reader to assume the favourable answer.
+
 ### Multi-language Devanagari support: shared lexicon, language-conditioned ranking (2026-09-22)
 
 The engine served one language's word-frequency priors (Nepali) under a

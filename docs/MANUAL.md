@@ -171,6 +171,13 @@ literature-searched beyond the general web checks cited in §20:
    Related-but-different prior art exists for lexical sharing across Indic
    languages in *machine translation* (e.g. arXiv:2305.03207); we have not
    found the equivalent for a transliteration *decoding-and-ranking* lexicon.
+   Stated precisely, since we checked rather than assumed it (§8.7): the
+   measured benefit is compactness and one code path, not cross-lingual
+   accuracy transfer to the low-resource languages sharing the automaton
+   with better-resourced ones --- swapping Bodo/Dogri onto an isolated,
+   two-language automaton changed their test hit counts by 0 and 1-in-2,000
+   respectively. We are not claiming a transfer-learning effect that the
+   data does not support.
 2. **A session-level, learning-aware evaluation** (`eval_session`, §12.10,
    added while preparing this document) that samples words by real corpus
    frequency and replays them through an engine that actually calls
@@ -933,6 +940,63 @@ macro top-1 on native-word validation cases rises from **~50.3%** to
 shortcoming of the phonetic model; §12.9's collision-bound analysis already
 established that Roman spellings are genuinely ambiguous between multiple
 valid Devanagari renderings, and only usage frequency disambiguates them.
+
+## Does the shared automaton transfer, or just compact? (ablation)
+
+One automaton for eight languages could help a low-resource language two
+structurally different ways, and it is worth being precise about which one
+this system actually gets, because only one of them is true.
+
+**Ranking cannot leak across languages by construction.** A language-aware
+query resolves its frequency through `lexicon.lang_index(code)` into that
+language's own byte of the level vector (§8.6); a word absent from Bodo's
+counts reads level 0 regardless of how common it is in Hindi. This is not
+an empirical finding, it follows from `pick`'s code (`lexicon.rs`) reading
+one index.
+
+**Generation can, in principle**: `LexiconDict::is_word` (`decoder.rs`)
+checks only whether the FST node is final --- true if *any* language
+attested the word, not the query's language specifically. A word too rare
+to independently clear Bodo's own frequency floor could still be
+dictionary-reachable for a Bodo query if Hindi or Marathi attested it. This
+is a real code path, not a hypothesis, and it is the one place cross-lingual
+transfer could actually happen in this architecture.
+
+**Measured, whether it does**: built an isolated lexicon from only Bodo and
+Dogri's IndicCorp text (`build_lexicon --raw <bd+dg-only dir>`, no other
+language present at all: 70,122 words, 0.50 MB against the full lexicon's
+share of the two), swapped it into a copy of `data/akshar.model` in place of
+the shared one (`examples/swap_lexicon.rs`, EM/LM/reranker weights
+byte-identical), and ran `eval_langs --langs brx,doi --lang-aware --ceiling
+50` on both:
+
+| | Bodo top-1 | Bodo in-list@8 | Dogri top-1 | Dogri in-list@8 |
+| :--- | ---: | ---: | ---: | ---: |
+| shared (8 languages) | 935/2244 | 1270/2244 | 656/2000 | 1084/2000 |
+| isolated (brx+doi only) | 935/2244 | 1270/2244 | 657/2000 | 1088/2000 |
+| difference | **+0** | **+0** | +1 | +4 |
+
+Bodo's hit counts are **exactly identical**, case for case; Dogri's differ
+by 1 and 4 cases out of 2,000 (well inside one standard error, $\approx
+\sqrt{0.5 \cdot 0.5 / 2000} \approx 1.1$pp $\approx 22$ cases). The
+generation-side transfer path is real code, but it fires on essentially
+nothing here.
+
+**Why**, given the mechanism genuinely exists: `build_lexicon`'s frequency
+floor is `count >= 2` (§12.1) --- a very low bar against Bodo's 2.3M-token
+sample. For the shared automaton to rescue a word, it must be genuine,
+correct Bodo vocabulary that occurred *exactly once* in Bodo's own sample
+(or not at all) while also clearing another language's floor --- a narrow
+intersection that this test suggests is close to empty in practice. Bodo
+being Sino-Tibetan (Bodo-Garo) rather than Indo-Aryan like the other seven
+plausibly narrows it further: less shared tatsam vocabulary to inherit.
+
+**So, precisely**: the shared automaton's measured benefit is compactness
+(one 24.44 MB container instead of an estimated eight separate ones,
+§10.3) and one code path (§7.3, §8.6), not cross-lingual transfer for the
+low-resource languages that would most want it. §2.1's contribution claim
+is deliberately scoped to the former and does not claim the latter --- this
+ablation is why.
 
 \newpage
 
