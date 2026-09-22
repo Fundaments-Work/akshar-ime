@@ -90,6 +90,10 @@ path = "src/bin/evaluate/analyze_errors.rs"
 name = "eval_langs"
 path = "src/bin/evaluate/eval_langs.rs"
 
+[[bin]]
+name = "eval_session"
+path = "src/bin/evaluate/eval_session.rs"
+
 # ------------------------------------------------------------------------------
 # Data Construction & Utility Binaries (src/bin/build/)
 # ------------------------------------------------------------------------------

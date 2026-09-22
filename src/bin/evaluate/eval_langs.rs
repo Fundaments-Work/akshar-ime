@@ -304,64 +304,105 @@ fn main() -> Result<()> {
         );
     }
 
-    println!("\nNative words by language (AK-Freq + AK-Uni + Dakshina)");
-    println!(
-        "{:<5} {:>6} {:>7} {:>9} {:>7}{ceiling_head} {:>9} {:>9}   IndicXlit AK-Freq top-1 (plain / +word LM)",
-        "lang", "n", "top1", "in-list", "MRR", "len-top1", "len-list"
-    );
-    let mut macro_top1 = Vec::new();
-    let mut macro_list = Vec::new();
-    let mut pooled = Stats::default();
+    let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len().max(1) as f64;
+    let mut strata_json = serde_json::Map::new();
     let mut lang_json = serde_json::Map::new();
-    for ((lang, strat), s) in &by_stratum {
-        if *strat != "native" {
-            continue;
-        }
-        let reference = indicxlit_ak_freq(lang)
-            .map(|(a, b)| format!("{a:.1} / {b:.1}"))
-            .unwrap_or_else(|| "—".into());
-        println!(
-            "{lang:<5} {:>6} {:>6.2}% {:>8.2}% {:>7.3}{} {:>8.2}% {:>8.2}%   {reference}",
-            s.n,
-            s.pct(s.top1),
-            s.pct(s.in_list),
-            s.mrr(),
-            ceiling_col(s),
-            s.pct(s.lenient_top1),
-            s.pct(s.lenient_in_list)
-        );
-        macro_top1.push(s.pct(s.top1));
-        macro_list.push(s.pct(s.in_list));
-        pooled.merge(s);
+    for lang in by_source
+        .keys()
+        .map(|(l, _)| l.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+    {
         let mut strata = serde_json::Map::new();
         for ((l2, st2), s2) in &by_stratum {
-            if l2 == lang {
+            if *l2 == lang {
                 strata.insert(st2.to_string(), s2.json());
             }
         }
-        lang_json.insert(lang.clone(), serde_json::Value::Object(strata));
+        lang_json.insert(lang, serde_json::Value::Object(strata));
     }
-    let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len().max(1) as f64;
-    println!(
-        "macro (mean over {} languages): top1 {:.2}%  in-list {:.2}%   pooled n={}: top1 {:.2}%  in-list {:.2}%  MRR {:.3}  | lenient top1 {:.2}%  in-list {:.2}%",
-        macro_top1.len(),
-        mean(&macro_top1),
-        mean(&macro_list),
-        pooled.n,
-        pooled.pct(pooled.top1),
-        pooled.pct(pooled.in_list),
-        pooled.mrr(),
-        pooled.pct(pooled.lenient_top1),
-        pooled.pct(pooled.lenient_in_list)
-    );
+
+    // Native words (AK-Freq + AK-Uni + Dakshina) and named entities (AK-NEI +
+    // AK-NEF + Wikidata) both get a macro/pooled summary: entity accuracy is
+    // a real, separate number, not a footnote, and burying it made a stale
+    // headline figure easy to miss when the pipeline changed under it.
+    for (label, strat, show_reference) in [
+        ("Native words", "native", true),
+        ("Named entities", "entity", false),
+    ] {
+        println!("\n{label} by language");
+        println!(
+            "{:<5} {:>6} {:>7} {:>9} {:>7}{ceiling_head} {:>9} {:>9}{}",
+            "lang",
+            "n",
+            "top1",
+            "in-list",
+            "MRR",
+            "len-top1",
+            "len-list",
+            if show_reference {
+                "   IndicXlit AK-Freq top-1 (plain / +word LM)"
+            } else {
+                ""
+            }
+        );
+        let mut macro_top1 = Vec::new();
+        let mut macro_list = Vec::new();
+        let mut pooled = Stats::default();
+        for ((lang, s2), s) in &by_stratum {
+            if s2 != &strat {
+                continue;
+            }
+            let reference = if show_reference {
+                let r = indicxlit_ak_freq(lang)
+                    .map(|(a, b)| format!("{a:.1} / {b:.1}"))
+                    .unwrap_or_else(|| "—".into());
+                format!("   {r}")
+            } else {
+                String::new()
+            };
+            println!(
+                "{lang:<5} {:>6} {:>6.2}% {:>8.2}% {:>7.3}{} {:>8.2}% {:>8.2}%{reference}",
+                s.n,
+                s.pct(s.top1),
+                s.pct(s.in_list),
+                s.mrr(),
+                ceiling_col(s),
+                s.pct(s.lenient_top1),
+                s.pct(s.lenient_in_list)
+            );
+            macro_top1.push(s.pct(s.top1));
+            macro_list.push(s.pct(s.in_list));
+            pooled.merge(s);
+        }
+        println!(
+            "macro (mean over {} languages): top1 {:.2}%  in-list {:.2}%   pooled n={}: top1 {:.2}%  in-list {:.2}%  MRR {:.3}  | lenient top1 {:.2}%  in-list {:.2}%",
+            macro_top1.len(),
+            mean(&macro_top1),
+            mean(&macro_list),
+            pooled.n,
+            pooled.pct(pooled.top1),
+            pooled.pct(pooled.in_list),
+            pooled.mrr(),
+            pooled.pct(pooled.lenient_top1),
+            pooled.pct(pooled.lenient_in_list)
+        );
+        strata_json.insert(
+            strat.to_string(),
+            serde_json::json!({
+                "macro": {"top1": mean(&macro_top1), "in_list": mean(&macro_list)},
+                "pooled": pooled.json(),
+            }),
+        );
+    }
 
     if let Some(p) = json_out {
         let doc = serde_json::json!({
             "dataset": dataset.display().to_string(),
             "k": k,
             "languages": lang_json,
-            "native_macro": {"top1": mean(&macro_top1), "in_list": mean(&macro_list)},
-            "native_pooled": pooled.json(),
+            "native_macro": strata_json["native"]["macro"],
+            "native_pooled": strata_json["native"]["pooled"],
+            "strata": strata_json,
         });
         std::fs::write(&p, serde_json::to_string_pretty(&doc)?)?;
         eprintln!("wrote {}", p.display());
