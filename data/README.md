@@ -40,6 +40,42 @@ make eval-langs     # per-language IME metrics (SPLIT=valid to tune, test to rep
 The legacy files under `aksharantar/` below are hin + nep only (merged,
 Hindi rows first); `data/pairs/` supersedes them for training and evaluation.
 
+## Word-frequency lexicon (ranking + dictionary constraint, 2026-09-22)
+
+The reranker's frequency signal and the decoder's dictionary-constrained
+pass (`docs/MANUAL.md` §8.6) both come from one shared multi-language word
+automaton, built separately from the pairs above — pairs teach *spelling*,
+this teaches *which spellings are actually words, how often, in which
+language*.
+
+```sh
+make data-fetch SET=indiccorp-v2-sample   # ~300 MB/language, pinned + SHA-256 -> data/raw/indiccorp-v2-sample/
+cargo run --release --bin build_lexicon   # counts + builds -> data/lexicon.bin
+```
+
+* Source: a **sample** of IndicCorp v2 (AI4Bharat) per language — evenly
+  spaced 25 MiB slices of the upstream monolingual files, not the full
+  ~113 GB corpus. That was a deliberate scope decision (this system's
+  minimalism constraint) made after an initial full-corpus download was
+  judged disproportionate; the sample's sufficiency was checked against
+  measured accuracy (`docs/MANUAL.md` §2.3) before being accepted, not
+  assumed. Nepali additionally keeps the original 86M-token
+  `corpus_clean.txt` this engine was built on, via `--extra`.
+  `scripts/data-manifest.tsv` pins all 63 slice/file rows.
+* `build_lexicon` (`src/bin/build/build_lexicon.rs`) tokenises on
+  U+0900–U+0963 runs (1–24 chars, NFC), honours the shared 1-in-200
+  sentence holdout (`core::holdout`) so evaluation sentences never leak
+  into the counts, caps each language to its 300,000 most frequent words
+  above a floor of 2 occurrences, and unions all 8 languages into one FST
+  (`fst` crate) keyed on Devanagari codepoints, one byte each — see
+  `docs/MANUAL.md` §8.6 for the quantisation and palette encoding.
+* Bodo and Dogri's counts are thin (their Aksharantar pair counts are too:
+  34,480 and 1,276 after cleaning) — their lexicon coverage, and therefore
+  their decoder generation ceiling, is measurably lower than the other six
+  languages' (`docs/MANUAL.md` §12.1, §12.8's `in@50` column).
+* Licence: IndicCorp v2 is released CC0 by AI4Bharat. Only the built
+  `lexicon.bin`/model ships — never the sample text.
+
 > **Frozen inputs.** The `data/pipeline/` scripts and `data/backup/` snapshots
 > were removed on 2026-09-08. The files below can no longer be regenerated
 > locally — they are inputs, not outputs. To rebuild them from scratch you

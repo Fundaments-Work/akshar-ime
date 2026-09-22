@@ -2,6 +2,108 @@
 
 ## Unreleased
 
+### Multi-language Devanagari support: shared lexicon, language-conditioned ranking (2026-09-22)
+
+The engine served one language's word-frequency priors (Nepali) under a
+"language-agnostic" label — the phonetics were script-general, but ranking
+was capped by whichever language the shipped vocabulary happened to be built
+from. Now genuinely multi-language: Hindi, Marathi, Nepali, Sanskrit,
+Konkani, Maithili, Bodo, Dogri, one phonetic engine, one shared ranking
+automaton, per-language conditioning. MANUAL.md §2, §8.6, §17.1 have the full
+writeup; summary here.
+
+#### Added — the shared lexicon (`src/core/lexicon.rs`, `build_lexicon`)
+- One minimal FST across all eight languages' words, keyed one byte per
+  Devanagari codepoint, values a de-duplicated palette of per-language
+  log-quantised frequency levels. Replaces the single-language
+  `HashMap<String, u32>` vocabulary and `WordTrie` at once — same automaton
+  is both the ranking frequency source and the decoder's dictionary
+  constraint (`Dictionary` trait, `decoder.rs`; `WordCounts` trait,
+  `reranker.rs`; both old implementations still work behind the same traits).
+- Built from an IndicCorp v2 **sample** per language (~300 MB/language,
+  pinned + SHA-256 verified, `scripts/data-manifest.tsv`,
+  `make data-fetch`), not the 113 GB full corpus — scoped down mid-session
+  after reconsidering the minimalism/accuracy tradeoff.
+- Container v8 (`unified.rs`): `lexicon: Option<LexiconData>`, supersedes
+  `vocab_freq` when present. v1–v7 files still load.
+- Language conditioning via feature augmentation [Daumé III 2007]: shared +
+  per-language-tagged sparse features, an 8×29 `dense_lang_weights` offset
+  matrix, language dropout in training, per-language `gamma_lang`
+  (`calibrate_blend`). `ImeEngine::set_language`/`languages()`.
+
+#### Fixed — three reasons the reranker never measured as beating the heuristic
+- **Reranker trained on one language.** Aksharantar's train file is sorted
+  by language; `--reranker-pairs 100000` trained on Hindi only, regardless
+  of how many languages the EM/LM saw. `prepare_pairs` now shuffles
+  (fixed seed) before any pair count is taken.
+- **EM/LM memorized the reranker's own eval pairs.** Nothing partitioned
+  train from valid/test at the word level. `prepare_pairs` now drops any
+  train pair whose native word also appears in valid or test.
+- **Dense-feature normalization drifted from training to inference**
+  (15–25% scale mismatch after a retrain moved the `emit`/`lm`
+  distributions). `train.rs` now recomputes `dense_mean`/`dense_std` via
+  Welford's algorithm every run instead of trusting stale v5 constants.
+
+#### Fixed — three more, found auditing the decoder/EM aligner for the above
+- **Beam search mixed candidate lengths**, biasing toward short spellings.
+  Rewritten position-synchronous (`stacks: Vec<Vec<Hyp>>` by Roman byte
+  position). +4.6pp macro in-list@8, no latency cost; beam width halved
+  (64→32) afterward with no further loss.
+- **`</w>` end-of-word LM signal trained but never charged at decode time**,
+  and pruned out of packed containers as apparently unused.
+  `TranslitModel::end_weight` now applies it. +1.2pp macro top-1
+  (Sanskrit +3.6pp).
+- **Sanskrit avagraha (U+093D) and inverted chandrabindu (U+0900) segmented
+  as phonetically-emitting aksharas**, corrupting EM alignment for 51,000+
+  Sanskrit pairs. Reclassified as combining marks.
+
+#### Added — evaluation
+- `eval_langs` (`make eval-langs`): per-language, per-stratum top-1/top-3/
+  in-list@k/MRR, `--lang-aware`, `--ceiling n` (generation vs. ranking
+  loss), lenient scoring (nukta/chandrabindu/anusvara equivalence classes).
+- `eval_session` (new): cold, uniformly-weighted accuracy is the right
+  number for cross-paper comparison but understates real use two ways —
+  real typing is frequency-weighted, not uniform, and the engine remembers
+  corrections (`user_confirms`) that `eval_langs` never exercises.
+  Frequency-weighted sampling + a live learning loop, pooled over 8
+  languages × 20,000 draws on `data/akshar.model`: cold 73.37%, 2nd
+  encounter 99.62%, blended session 97.28% (top-1). Reported as a ceiling
+  under a charitable correction-always-lands assumption, not a replacement
+  for the cold number.
+- `data/pairs/{train,valid,test}.jsonl` (`prepare_pairs`, `make
+  data-prepare`): 7,308,261 / 30,565 / 48,277 pairs across 8 languages,
+  replacing the single-language `data/aksharantar/*.jsonl` split for all
+  multi-language numbers. Per-language counts are far from uniform (Bodo
+  34,480 / Dogri 1,276 train pairs vs. 1.2–2.3M for the other six) — both
+  languages' `in@50` generation ceiling is measurably lower, a data
+  problem `--reranker-pairs` cannot fix.
+
+#### Changed — model size
+- Desktop container capped at 24.44 MB (300k-word/language lexicon +
+  relative-entropy trigram pruning, `prune_lm`, threshold swept
+  empirically rather than reusing the old single-language default) to fit
+  a 25 MB budget. Cost of the cap, measured: pooled native top-1 60.69% vs.
+  62.61% uncapped/unpruned (−1.9pp for −13 MB).
+  Browser: `make web-model` output grew to 23.30 MB / 13.97 MB Brotli
+  (~3× the single-language 4.94 MB Brotli baseline) because the shared
+  lexicon ships in both containers unchanged; a browser-specific smaller
+  lexicon cap is the lever if that needs to come down further and has not
+  been built.
+
+#### Docs
+- MANUAL.md: multi-language architecture (§2, §8.6), corrected "not yet
+  multi-language" scope claims (§17.4), new defect-register entries
+  (§17.1, D19–D24), evaluation methodology for the new pipeline and
+  `eval_session` (§12), rebuilt Source map (§16) and container-version
+  table (§10.2) against the current tree, References additions ([Daumé III
+  2007]; FST-transliteration prior art). Also corrected, while verifying
+  citations against their actual publications: a reference's title
+  ([Kirov et al. 2024] was cited as "...for Input Method Editors"; the
+  paper is "Context-aware Transliteration of Romanized South Asian
+  Languages") and roughly fifteen `§N` cross-references left pointing at
+  the wrong section by an earlier reorganization this changelog does not
+  otherwise record — neither audit is claimed exhaustive.
+
 ### Sentence context via corpus bigrams
 New information, not new parameters: the engine now blends P(cur | prev)
 from a pruned corpus bigram table into the pre-squash reranker margin

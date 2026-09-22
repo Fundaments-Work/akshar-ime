@@ -1,8 +1,10 @@
 # Akshar Devanagari IME
 
-Roman-script input method for the Devanagari **script** — not one language.
-You type `namaste`, it offers `नमस्ते`, whether the word is Hindi, Nepali,
-Marathi, Sanskrit, or any other language written in Devanagari lipi.
+Roman-script input method for the Devanagari **script** — genuinely across
+languages, not one language under a script-general label. One phonetic
+engine and one shared ranking lexicon serve Hindi, Marathi, Nepali,
+Sanskrit, Konkani, Maithili, Bodo and Dogri; a language tag conditions
+ranking explicitly. You type `namaste`, it offers `नमस्ते`.
 
 ![CI](https://github.com/sapienskid/akshar-ime/actions/workflows/ci.yml/badge.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue)
@@ -12,13 +14,14 @@ orthographic syllables, a modified Kneser-Ney syllable language model, and a
 linear discriminative reranker. Inference is beam search plus dot products —
 no tensor library, no GPU.
 
-**11.37 MB desktop, 4.94 MB Brotli in the browser. 0.72 ms per query.**
+**24.44 MB desktop for all 8 languages, 13.97 MB Brotli in the browser.
+1.16 ms per query.**
 
 ## What contributes what
 
-Measured by ablation, reproducible from the shipped binary (`make ablate`).
-Component table measured 2026-09-08; re-measured 2026-09-10 on the retrained
-model (full 80.98%, trigram −6.03pp, sparse −0.48pp, dense −0.24pp — §9):
+Measured by ablation on the single-language predecessor of this model,
+reproducible from a shipped binary (`make ablate`); not yet re-run on the
+8-language lexicon (`docs/MANUAL.md` §13):
 
 | Ranking stage | `AK-Freq` top-1 | Δ |
 | :--- | ---: | ---: |
@@ -27,58 +30,64 @@ model (full 80.98%, trigram −6.03pp, sparse −0.48pp, dense −0.24pp — §9
 | + 29 dense features | 81.93% | +0.91 |
 | + 2²⁰ sparse table (shipped) | 81.83% | −0.10 |
 
-Removing the trigram language model costs **−6.03pp** on the current model
-(−3.89pp on the 2026-09-08 model); it is the single largest
-component. See the manual for per-stratum numbers with McNemar p-values.
+Removing the trigram language model costs **−6.03pp**; it is the single
+largest component. Two components measured since, directly on the
+multi-language model: the lexicon/language-conditioned ranking itself
+(macro native top-1 ~50.3% phonetics-only → ~64.4% with it, validation
+split, `AKSHAR_NO_RERANK=1`) and end-of-word LM scoring (+1.2pp macro
+top-1). See the manual for per-stratum numbers with McNemar p-values.
 
 ## Measured performance
 
-Held-out AI4Bharat Aksharantar test split (4,101 cases), measured
-2026-09-10 on the retrained `data/akshar.model` (`make train-mid`
-with the corrected pipeline: raw dense statistics, reserved dev set,
-holdout-filtered vocabulary) at default settings
-(`make eval`, `make eval-full`, `make ablate`).
-The 2026-09-08 model measured 81.83/47.79/31.21 on the same harness;
-the retrain reproduces it within bootstrap noise (pooled CIs overlap).
+Held-out multi-language test split (34,011 native-word + 14,266
+named-entity cases across all 8 languages, `data/pairs/test.jsonl`, built
+by `make data-prepare` from AI4Bharat Aksharantar), measured on
+`data/akshar.model`, language-aware (`make eval-langs`):
 
-| Split | n | top-1 | top-5 |
-| :--- | ---: | ---: | ---: |
-| `AK-Freq` (native words) | 2,108 | **80.98%** | 91.84% |
-| `AK-NEI` (named entities) | 1,176 | 45.32% | 70.15% |
-| `AK-NEF` (named entities) | 817 | 29.01% | 51.53% |
-| All cases | 4,101 | 60.40% | 77.59% |
+| Lang | native top-1 | in-list@8 | entity top-1 | IndicXlit AK-Freq (plain / +LM) |
+| :--- | ---: | ---: | ---: | ---: |
+| Hindi | 53.42% | 81.45% | 43.59% | 58.6 / 67.9 |
+| Marathi | 66.78% | 83.79% | 37.15% | 74.7 / 85.5 |
+| Nepali | 78.32% | 92.55% | 34.97% | 80.2 / 86.6 |
+| Sanskrit | 75.30% | 92.07% | 18.48% | 81.6 / 90.1 |
+| Konkani | 56.24% | 79.15% | 30.94% | 65.4 / 76.3 |
+| Maithili | 69.12% | 90.98% | 38.78% | 78.7 / 87.6 |
+| Bodo | 41.67% | 56.60% | 18.40% | 74.8 / 78.4 |
+| Dogri | 32.80% | 54.20% | — | — |
+| **pooled** (n=34,011 / 14,266) | **60.69%** | 81.27% | **31.59%** | |
 
-Pooled top-1 bootstrap 95% CI [58.94%, 61.89%]; MRR 0.6798; CER on `AK-Freq`
-top-1 is 3.90% (measured 2026-09-08, not re-measured on the retrain). For reference, IndicXlit (an ~11M-parameter transformer) reports
-80.25% top-1 on the native split and 52.67% on named entities *without* LM
-reranking; with its word-unigram rerank it reaches 86.6% / ~62% on Nepali
-([Madhani et al. 2023], Table 6). Neither figure is re-measured here, and no
-controlled head-to-head is claimed — native accuracy here is comparable to the
-unreranked baseline, named-entity accuracy is well behind either way.
+This is the cold, uniformly-weighted number — the one comparable to
+IndicXlit's own published methodology, and this system trails its
+word-LM-reranked column in most languages (only Nepali is close,
+unreranked). It is **not** what returning-user accuracy looks like: sampling
+by real word frequency instead of uniformly, with the engine's actual
+`user_confirms` learning path exercised, pooled top-1 rises to **97.28%**
+(`eval_session`, `docs/MANUAL.md` §12.10 — reported as a ceiling under a
+charitable assumption, not a substitute for the table above).
 
 | | Desktop | Browser |
 | :--- | ---: | ---: |
-| Container | 11.37 MB | 8.91 MB |
-| Brotli | 6.72 MB | 4.94 MB |
-| Query latency | 0.72 ms (re-measured 2026-09-10, $k=10$, full set) | not re-measured since 2026-09-06 |
-| Cold start | ~1.5 s | — |
+| Container | 24.44 MB | 23.30 MB |
+| Brotli | n/a (native binary) | 13.97 MB |
+| Query latency | 1.16 ms ($k=8$, beam 32) | not re-measured on this artifact |
+| Cold start | not re-measured on this artifact | — |
 
 ## Documentation
 
-**[`docs/MANUAL.md`](docs/MANUAL.md)** — the complete reference, 52 pages.
+**[`docs/MANUAL.md`](docs/MANUAL.md)** — the complete reference, 56 pages.
 Build a PDF with `make manual`.
 
 | Part | Contents |
 | :--- | :--- |
 | Theory | source-channel formulation, akshara segmentation, EM with scaled forward–backward, modified Kneser-Ney, decoding, discriminative reranking |
-| Implementation | module map, container format, performance engineering |
-| Practice | training pipeline, **evaluation methodology**, ablations with McNemar significance, deployment |
-| Status | known defects, experimental record, roadmap |
+| Implementation | module map, the shared multi-language lexicon, container format, performance engineering |
+| Practice | training pipeline, **evaluation methodology** (including cold vs. session accuracy), ablations with McNemar significance, deployment |
+| Status | contribution and prior art, known defects, experimental record, roadmap |
 
 Every metric is defined formally, every technique is credited to its authors,
 and every term is in the glossary. Threats to validity are stated explicitly.
 
-The live defect register and roadmap are `docs/MANUAL.md` §11–13;
+The live defect register and roadmap are `docs/MANUAL.md` §17–18;
 `docs/plans/archive/` preserves the experiment log, literature review and
 research agenda from development — what was tried and rejected, not just what
 shipped.
@@ -103,38 +112,54 @@ Browser: build the engine for the web (`make wasm`), served by the standalone pl
 ## Reproducing the numbers
 
 ```sh
-make test          # tests, including the accuracy regression guard
-make eval          # accuracy by split
-make eval-full     # bootstrap CIs, MRR, per-query latency
-make eval-ime      # plain-language report + machine JSON (docs/generated/eval.json)
+make data-fetch SET=aksharantar        # pinned, checksummed source data
+make data-fetch SET=indiccorp-v2-sample
+make data-prepare                      # builds data/pairs/{train,valid,test}.jsonl
+make test                              # tests, including the accuracy regression guard
+make eval-langs                        # per-language IME metrics (this README's table)
+cargo run --release --bin eval_session -- --lang-aware   # cold vs. session accuracy
+make eval-full     # bootstrap CIs, MRR, per-query latency (single-language harness)
 make eval-errors   # oracle curves, error taxonomy, CER, collision bound
 make ablate        # component contributions
 ```
 
 Training (`make train-mid`, `make train-full`) is documented in the manual.
 Note that `--reranker-pairs` sizes the reranker's training set only — the EM
-model and language model always use all 3.59M pairs.
+model and language model always use all pairs, all 8 languages.
 
 ## Honest limitations
 
-- Script-general engine, still biased priors: the akshara model, decoder, and
-  scoring are language-agnostic (nothing downstream reads a language tag —
-  `data/README.md`), but the frequency vocabulary is news-domain-heavy, the
-  34-suffix strip list is Nepali-specific, and the test set is one
-  Devanagari benchmark. Making the *priors* as script-general as the *engine*
-  is the accuracy program (`docs/MANUAL.md` §§11–13,
-  `docs/plans/devanagari-script-plan.md`).
-- One benchmark, one test set (Aksharantar, 4,101 cases).
-- Named entities are well behind the neural baseline.
-- Reranking is worth +6.45pp overall on the 2026-09-08 model (+0.24pp dense+sparse
-  on the retrained model at full 80.98% vs heuristic-only 80.74%), but **most of
-  that has always been a 3-parameter frequency heuristic** — the 10⁶-parameter
-  learned stage added +0.91pp then, and its
-  sparse half adds nothing on native words (p = 0.851, measured 2026-09-08).
-- 5x more reranker training data was tested and changed nothing; the cause is
-  that `W_DENSE` has never been refit by this pipeline (manual §12.3).
+- On the metric comparable across systems (cold, uniform top-1), this does
+  **not** beat IndicXlit's word-LM-reranked numbers in most of the eight
+  languages — only Nepali is close, unreranked (table above). The defensible
+  claim is architectural (no neural runtime, ~24 MB, sub-2ms CPU decode),
+  not an accuracy-SOTA one.
+- Bodo and Dogri are limited by how little clean training text exists for
+  them (34,480 and 1,276 pairs after cleaning) — a generation-ceiling
+  problem, not just a ranking one; more reranker supervision alone will not
+  close their gap.
+- Named entities are well behind native-word accuracy in every language
+  (31.59% pooled vs. 60.69% native).
+- The eight-language browser profile has not been measured for query
+  latency; its size (13.97 MB Brotli, ~3× the single-language predecessor,
+  because the shared lexicon ships unchanged) has been.
+- The ablation table above is the single-language predecessor's; it has not
+  been re-run on the current 8-language lexicon model.
+- `--reranker-pairs 0` (the ~7.3M-pair full run) has not been retried since
+  the three reranker training defects below were fixed. It was tested and
+  falsified under the broken pipeline — whether more supervision helps once
+  training data is actually multi-language and leak-free is open, not
+  re-confirmed negative.
+- Three defects explain why the reranker had never measured as beating the
+  3-parameter frequency heuristic despite being individually correct code:
+  the reranker trained on Hindi only (Aksharantar's train file is
+  language-sorted and was never shuffled before subsetting), the EM/LM
+  had usually already memorized the words the reranker was later scored on
+  (no word-level train/eval split existed), and dense-feature normalization
+  silently drifted out of sync with retrains. All three are fixed in
+  `prepare_pairs`/`train.rs`; see `docs/MANUAL.md` §17.1, D19–D21.
 
-Manual chapter 11 lists every known defect.
+Manual chapter 17 lists every known defect.
 
 ## License
 
