@@ -43,17 +43,23 @@ fn classify(ch: char) -> AksharaClass {
     if cp == 0x094D {
         return AksharaClass::Halanta;
     }
-    // Independent vowels: U+0904..U+0914, plus ॠ U+0960, ॡ U+0961.
-    if (0x0904..=0x0914).contains(&cp) || cp == 0x0960 || cp == 0x0961 {
+    // Independent vowels: U+0904..U+0914, ॠ ॡ (U+0960, U+0961), the
+    // Marathi/Kashmiri/Bihari vowels ॲ..ॷ (U+0972..U+0977), and ॐ (U+0950),
+    // which is a whole syllable of its own.
+    if (0x0904..=0x0914).contains(&cp)
+        || cp == 0x0960
+        || cp == 0x0961
+        || (0x0972..=0x0977).contains(&cp)
+        || cp == 0x0950
+    {
         return AksharaClass::IndependentVowel;
     }
-    // Consonants: U+0915..U+0939, nukta-formed U+0958..U+095F, extended U+0978..U+097A,
-    // plus a couple of stray consonants (ऱ U+0931, ऴ U+0934).
+    // Consonants: U+0915..U+0939 (including ऩ ऱ ऴ), the nukta forms
+    // U+0958..U+095F, and the extended letters U+0978..U+097F (Marwari ॸ,
+    // ॹ ॺ, Sindhi implosives ॻ ॼ ॾ ॿ and the glottal stop ॽ).
     if (0x0915..=0x0939).contains(&cp)
         || (0x0958..=0x095F).contains(&cp)
-        || (0x0978..=0x097A).contains(&cp)
-        || cp == 0x0931
-        || cp == 0x0934
+        || (0x0978..=0x097F).contains(&cp)
     {
         return AksharaClass::Consonant;
     }
@@ -69,12 +75,18 @@ fn classify(ch: char) -> AksharaClass {
     {
         return AksharaClass::Matra;
     }
-    // Combining marks: anusvara U+0902, visarga U+0903, chandrabindu U+0901,
-    // nukta U+093C, and the stress/cantillation marks U+0951..U+0957.
+    // Combining marks: anusvara U+0902, visarga U+0903, chandrabindu U+0901
+    // and its inverted form U+0900, nukta U+093C, the stress/cantillation
+    // marks U+0951..U+0957, and avagraha ऽ (U+093D).  Avagraha marks an
+    // elided vowel and is silent in roman (सोऽहम् = "soham"), so it belongs
+    // to the syllable it follows; as a unit of its own the aligner had to
+    // make it "emit" a letter stolen from a neighbour (51k Sanskrit pairs).
     if cp == 0x0902
         || cp == 0x0903
         || cp == 0x0901
+        || cp == 0x0900
         || cp == 0x093C
+        || cp == 0x093D
         || (0x0951..=0x0957).contains(&cp)
     {
         return AksharaClass::CombiningMark;
@@ -197,6 +209,21 @@ mod tests {
         assert_eq!(segment("a"), vec!["a"]);
         assert_eq!(segment("क a"), vec!["क", " ", "a"]);
         assert_eq!(segment("१२"), vec!["१", "२"]);
+    }
+
+    #[test]
+    fn avagraha_stays_with_the_syllable_it_follows() {
+        assert_eq!(segment("सोऽहम्"), vec!["सोऽ", "ह", "म्"]);
+        assert_eq!(segment("ततोऽतितुङ्ग"), vec!["त", "तोऽ", "ति", "तु", "ङ्ग"]);
+    }
+
+    #[test]
+    fn om_and_extended_letters_are_syllables() {
+        assert_eq!(segment("ॐ"), vec!["ॐ"]);
+        // ॲप (Marathi "app"): candra-A is an independent vowel.
+        assert_eq!(segment("ॲप"), vec!["ॲ", "प"]);
+        // Sindhi implosive ॻ is a consonant that takes a vowel sign.
+        assert_eq!(segment("ॻा"), vec!["ॻा"]);
     }
 
     #[test]

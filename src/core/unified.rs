@@ -204,6 +204,7 @@ impl UnifiedModel {
                     trigram_backoff: codec::decode_weights(&raw.trigram_backoff_enc)?,
                     trigram_index: Default::default(),
                     akshara_index: Default::default(),
+                    eow_id: None,
                 };
                 let vocab_freq = codec::decode_vocab(&raw.vocab_enc, &translit.aksharas)?;
                 Self {
@@ -350,6 +351,7 @@ impl TryFrom<UnifiedModelV4> for UnifiedModel {
             trigram_backoff: codec::decode_weights(&v.trigram_backoff_enc)?,
             trigram_index: Default::default(),
             akshara_index: Default::default(),
+            eow_id: None,
         };
         let vocab_freq = codec::decode_vocab(&v.vocab_enc, &translit.aksharas)?;
         Ok(Self {

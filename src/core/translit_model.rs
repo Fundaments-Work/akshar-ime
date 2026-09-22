@@ -33,6 +33,11 @@ fn find_weight(row: &[(u32, f32)], id: u32) -> Option<f32> {
 /// changes.  Kept small and human readable.
 pub const MODEL_VERSION: u32 = 2;
 
+/// Synthetic end-of-word akshara.  The trainer appends it to every word for
+/// LM counting, so P(</w> | a, b) is the probability that a word ends after
+/// `a b`; it has no emissions, so the decoder never generates it.
+pub const END_OF_WORD: &str = "</w>";
+
 /// The compact, serialisable transliteration model.
 ///
 /// A [u32] id in `aksharas` / `chunks` is an index into the corresponding
@@ -66,6 +71,9 @@ pub struct TranslitModel {
     /// Runtime index from akshara string -> id.  Not serialised; built on load.
     #[serde(skip)]
     pub akshara_index: FxHashMap<String, u32>,
+    /// Runtime id of [`END_OF_WORD`], if the model was trained with it.
+    #[serde(skip)]
+    pub eow_id: Option<u32>,
 }
 
 /// Maximum roman characters a single akshara can absorb.
@@ -187,6 +195,25 @@ impl TranslitModel {
         self.word_start.get(a as usize).copied().unwrap_or(12.0) as f64
     }
 
+    /// End-of-word weight -log P(</w> | prev2, prev): the cost of the word
+    /// ending after its last two aksharas.  Completing a path must pay it,
+    /// exactly as every other akshara pays its LM transition; without it the
+    /// LM cannot tell a plausible ending from an implausible one, which is
+    /// where vowel-sign errors concentrate.  Zero for models trained without
+    /// the token, and under the `AKSHAR_NO_EOW` ablation.
+    pub fn end_weight(&self, prev2: Option<u32>, prev: Option<u32>) -> f64 {
+        let (Some(eow), Some(b)) = (self.eow_id, prev) else {
+            return 0.0;
+        };
+        if crate::core::ablation::no_eow() {
+            return 0.0;
+        }
+        match prev2 {
+            Some(a) if !crate::core::ablation::no_trigram() => self.trigram_weight(a, b, eow),
+            _ => self.bigram_weight(b, eow),
+        }
+    }
+
     /// Serialise to `path` with bincode.
     pub fn save(&self, path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
         use std::io::BufWriter;
@@ -237,6 +264,16 @@ impl TranslitModel {
             .enumerate()
             .map(|(i, a)| (a.clone(), i as u32))
             .collect();
+        // Only a model that kept its end-of-word transitions can score word
+        // endings.  Packers before the fix pruned every transition into </w>
+        // while keeping the akshara, and backing off from there yields a
+        // per-context constant, not P(</w> | ...): such models must decode
+        // exactly as they were trained to.
+        self.eow_id = self.akshara_index.get(END_OF_WORD).copied().filter(|&eow| {
+            self.bigrams
+                .iter()
+                .any(|row| find_weight(row, eow).is_some())
+        });
     }
 
     /// Basic sanity: model is non-empty and internally consistent.
@@ -334,6 +371,7 @@ mod tests {
             trigram_backoff: vec![],
             trigram_index: FxHashMap::default(),
             akshara_index: FxHashMap::default(),
+            eow_id: None,
         };
         assert!(m.validate());
         assert_eq!(m.emission_weight(0, "ka"), 0.0);
@@ -356,6 +394,7 @@ mod tests {
             trigram_backoff: vec![],
             trigram_index: FxHashMap::default(),
             akshara_index: FxHashMap::default(),
+            eow_id: None,
         };
         // seen: direct weight
         assert_eq!(m.bigram_weight(0, 1), 2.0);

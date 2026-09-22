@@ -13,7 +13,6 @@ use crate::core::translit_model::{TranslitModel, MAX_CHUNK};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::HashMap;
 
-const MAX_STEPS: usize = 32;
 /// Drop emissions worse than this -log weight (they are alignment noise).
 const MAX_EMISSION_WEIGHT: f32 = 8.0;
 /// Keep at most this many aksharas per chunk in the reverse index.
@@ -53,18 +52,6 @@ pub struct ModelDecoder {
     reverse: HashMap<String, Vec<(u32, f32)>>,
     /// Search / scoring configuration.
     pub config: DecoderConfig,
-}
-
-#[derive(Debug, Clone)]
-struct BeamState {
-    pos: usize,
-    prev: Option<u32>,  // last akshara (None = word start)
-    prev2: Option<u32>, // second-to-last akshara
-    score: f64,         // total = emit + lm_weight * lm (for beam ordering)
-    emit: f64,          // accumulated emission -log weight
-    lm: f64,            // accumulated LM -log weight (unscaled)
-    phash: u64,         // cheap hash of the path (dedup key)
-    path: Option<u32>,  // index of the last cons cell in the path arena
 }
 
 /// One cell of a persistent (immutable) path in the arena.
@@ -153,6 +140,20 @@ impl ModelDecoder {
     }
 
     /// Decode into decomposed candidates (emission + LM separately) for reranking.
+    ///
+    /// Position-synchronous beam search over the lattice: `stacks[p]` holds
+    /// the partial paths that have consumed exactly `p` roman bytes, so a
+    /// beam only ever compares paths that have explained the same input.
+    /// (A single beam over paths of mixed length favours the ones that have
+    /// read the least -- their cost is lower only because they are shorter --
+    /// and pruned the gold spelling of long-chunk words: widening that beam
+    /// from 64 to 256 raised the in-top-50 rate by 5-10 points for Hindi,
+    /// Konkani and Bodo.)
+    ///
+    /// Paths in one stack that spell the same akshara sequence differ only in
+    /// how the roman was segmented; their futures are identical, so only the
+    /// cheapest is kept (Viterbi recombination).  Distinct spellings are never
+    /// merged: the decoder returns the k best distinct strings.
     pub fn decode_detailed(&self, roman: &str, k: usize) -> Vec<DecodedCandidate> {
         let roman = roman.to_ascii_lowercase();
         // Exp 2: the lattice indexes bytes; non-ASCII input can never match an
@@ -166,61 +167,72 @@ impl ModelDecoder {
             return vec![];
         }
         let k = k.max(1);
+        let width = self.config.beam_width.max(1);
 
-        // Persistent path arena: extending a path is O(1) (push one cons cell),
-        // so the beam never clones full paths.
-        let mut arena: Vec<PathCell> = Vec::with_capacity(1024);
-
-        let mut beam: Vec<BeamState> = vec![BeamState {
-            pos: 0,
-            prev: None,
-            prev2: None,
-            score: 0.0,
-            emit: 0.0,
-            lm: 0.0,
-            phash: 0,
-            path: None,
-        }];
-        // Complete paths: dev string -> (score, emit, lm, akshara_count).
-        let mut seen: FxHashMap<String, (f64, f64, f64, usize)> = FxHashMap::default();
-
-        // A generated hypothesis before it is admitted to the beam.  It carries
-        // its parent's arena index and its own akshara rather than an arena
-        // cell: only the survivors of pruning are materialised, which cuts
-        // arena writes from O(beam x edges) to O(beam) per step.
-        struct Cand {
-            pos: usize,
+        /// A partial path: its arena cell is written only if it survives
+        /// pruning in its own stack.
+        struct Hyp {
             prev2: Option<u32>,
+            prev: Option<u32>,
             score: f64,
             emit: f64,
             lm: f64,
             phash: u64,
             parent: Option<u32>,
-            akshara: u32,
         }
-        let mut next: Vec<Cand> = Vec::with_capacity(self.config.beam_width * 16);
+        // Persistent path arena: extending a path is O(1) (one cons cell).
+        let mut arena: Vec<PathCell> = Vec::with_capacity(1024);
+        let mut stacks: Vec<Vec<Hyp>> = (0..=m).map(|_| Vec::new()).collect();
+        stacks[0].push(Hyp {
+            prev2: None,
+            prev: None,
+            score: 0.0,
+            emit: 0.0,
+            lm: 0.0,
+            phash: 0,
+            parent: None,
+        });
 
-        for _step in 0..MAX_STEPS {
-            if beam.is_empty() {
-                break;
+        // Keep the `width` cheapest distinct akshara sequences of a stack.  A
+        // linear-time selection first cuts the stack (thousands of entries)
+        // to a few times the width, so only that remainder is sorted for
+        // recombination; alternative segmentations of one string rarely fill
+        // more than that margin.
+        let prune = |stack: &mut Vec<Hyp>| {
+            let margin = width * 4;
+            if stack.len() > margin {
+                stack.select_nth_unstable_by(margin, |a, b| a.score.total_cmp(&b.score));
+                stack.truncate(margin);
             }
-            next.clear();
+            stack.sort_unstable_by(|a, b| a.phash.cmp(&b.phash).then(a.score.total_cmp(&b.score)));
+            stack.dedup_by_key(|h| h.phash);
+            if stack.len() > width {
+                stack.select_nth_unstable_by(width, |a, b| a.score.total_cmp(&b.score));
+                stack.truncate(width);
+            }
+        };
 
-            for st in &beam {
-                if st.pos == m {
-                    let (dev, count) = self.reconstruct(&arena, st.path);
-                    seen.entry(dev)
-                        .and_modify(|best| {
-                            if st.score < best.0 {
-                                *best = (st.score, st.emit, st.lm, count);
-                            }
-                        })
-                        .or_insert((st.score, st.emit, st.lm, count));
-                    continue;
-                }
-                for &e in &edges_by_pos[st.pos] {
-                    let emit_w = e.w as f64;
-                    let fluency = match (st.prev2, st.prev) {
+        for pos in 0..m {
+            let mut stack = std::mem::take(&mut stacks[pos]);
+            if stack.is_empty() {
+                continue;
+            }
+            prune(&mut stack);
+            for h in stack {
+                // `prev` is the akshara this hypothesis ends in; materialise
+                // it so its extensions can point at it.
+                let path = match h.prev {
+                    Some(a) => {
+                        arena.push(PathCell {
+                            parent: h.parent,
+                            akshara: a,
+                        });
+                        Some(arena.len() as u32 - 1)
+                    }
+                    None => None,
+                };
+                for &e in &edges_by_pos[pos] {
+                    let fluency = match (h.prev2, h.prev) {
                         (_, None) => self.model.start_weight(e.a),
                         (None, Some(b)) => self.model.bigram_weight(b, e.a),
                         (Some(a), Some(b)) if !crate::core::ablation::no_trigram() => {
@@ -228,53 +240,49 @@ impl ModelDecoder {
                         }
                         (Some(_), Some(b)) => self.model.bigram_weight(b, e.a),
                     };
-                    let emit = st.emit + emit_w;
-                    let lm = st.lm + fluency;
-                    next.push(Cand {
-                        pos: st.pos + e.len,
-                        prev2: st.prev,
+                    let emit = h.emit + e.w as f64;
+                    let lm = h.lm + fluency;
+                    stacks[pos + e.len].push(Hyp {
+                        prev2: h.prev,
+                        prev: Some(e.a),
                         score: emit + lm * self.config.lm_weight,
                         emit,
                         lm,
-                        phash: path_hash(st.phash, e.a),
-                        parent: st.path,
-                        akshara: e.a,
+                        phash: path_hash(h.phash, e.a),
+                        parent: path,
                     });
                 }
             }
+        }
 
-            // Keeping the best `beam_width` of ~5,000 hypotheses does not need
-            // them ordered, so partition in O(n) instead of sorting in
-            // O(n log n).  The beam's internal order is irrelevant: complete
-            // paths are collected into `seen` and sorted once at the end.
-            //
-            // Distinct paths are deliberately kept separate rather than merged
-            // by state: this decoder extracts k-best *paths*, not the 1-best
-            // path per state.
-            let width = self.config.beam_width;
-            if next.len() > width {
-                next.select_nth_unstable_by(width, |a, b| a.score.total_cmp(&b.score));
-                next.truncate(width);
-            }
-
-            beam.clear();
-            for c in next.iter() {
-                let idx = arena.len() as u32;
-                arena.push(PathCell {
-                    parent: c.parent,
-                    akshara: c.akshara,
-                });
-                beam.push(BeamState {
-                    pos: c.pos,
-                    prev: Some(c.akshara),
-                    prev2: c.prev2,
-                    score: c.score,
-                    emit: c.emit,
-                    lm: c.lm,
-                    phash: c.phash,
-                    path: Some(idx),
-                });
-            }
+        // Complete paths: keep the best alignment of every distinct string
+        // (the same bounded pruning, with room for k results), then charge
+        // the end-of-word transition.
+        let mut done = std::mem::take(&mut stacks[m]);
+        let keep = width.max(k) * 4;
+        if done.len() > keep {
+            done.select_nth_unstable_by(keep, |a, b| a.score.total_cmp(&b.score));
+            done.truncate(keep);
+        }
+        done.sort_unstable_by(|a, b| a.phash.cmp(&b.phash).then(a.score.total_cmp(&b.score)));
+        done.dedup_by_key(|h| h.phash);
+        let mut seen: FxHashMap<String, (f64, f64, f64, usize)> = FxHashMap::default();
+        for h in done {
+            let Some(last) = h.prev else { continue };
+            arena.push(PathCell {
+                parent: h.parent,
+                akshara: last,
+            });
+            let (dev, count) = self.reconstruct(&arena, Some(arena.len() as u32 - 1));
+            let eow = self.model.end_weight(h.prev2, h.prev);
+            let (score, lm) = (h.score + eow * self.config.lm_weight, h.lm + eow);
+            seen.entry(dev)
+                .and_modify(|best| {
+                    if score < best.0 {
+                        *best = (score, h.emit, lm, count);
+                    }
+                })
+                .or_insert((score, h.emit, lm, count));
         }
 
         let mut results: Vec<DecodedCandidate> = seen
@@ -289,7 +297,7 @@ impl ModelDecoder {
         results.sort_by(|a, b| {
             let at = a.emit + a.lm * self.config.lm_weight;
             let bt = b.emit + b.lm * self.config.lm_weight;
-            at.total_cmp(&bt)
+            at.total_cmp(&bt).then_with(|| a.dev.cmp(&b.dev))
         });
         results.truncate(k);
         results
@@ -297,114 +305,13 @@ impl ModelDecoder {
 
     /// Walk a persistent path in the arena back to the root, producing the
     /// Devanagari string and its akshara count.
-    /// M4: decode restricted to paths that stay inside the word trie — the
-    /// lattice ∩ dictionary graph intersection.  Every edge must extend the
-    /// current trie node; only completions on trie terminals (real words with
-    /// a corpus frequency) are returned.  Returns (dev, score, freq).
-    pub fn decode_in_words(
-        &self,
-        roman: &str,
-        k: usize,
-        trie: &crate::core::wordtrie::WordTrie,
-    ) -> Vec<(String, f64, u32)> {
-        let roman = roman.to_ascii_lowercase();
-        let edges_by_pos = self.build_edges(&roman);
-        let m = roman.len();
-        if m == 0 {
-            return vec![];
-        }
-        let k = k.max(1);
-
-        let mut arena: Vec<PathCell> = Vec::with_capacity(256);
-        #[derive(Clone)]
-        struct St {
-            pos: usize,
-            prev: Option<u32>,
-            prev2: Option<u32>,
-            score: f64,
-            path: Option<u32>,
-            wnode: usize,
-        }
-        let mut beam = vec![St {
-            pos: 0,
-            prev: None,
-            prev2: None,
-            score: 0.0,
-            path: None,
-            wnode: 0,
-        }];
-        let mut seen: FxHashMap<String, (f64, u32)> = FxHashMap::default();
-
-        for _step in 0..MAX_STEPS {
-            if beam.is_empty() {
-                break;
-            }
-            let mut next: Vec<St> = Vec::with_capacity(beam.len() * 8);
-            for st in &beam {
-                if st.pos == m {
-                    if let Some(f) = trie.freq(st.wnode) {
-                        let (dev, _) = self.reconstruct(&arena, st.path);
-                        seen.entry(dev)
-                            .and_modify(|best| {
-                                if st.score < best.0 {
-                                    *best = (st.score, f);
-                                }
-                            })
-                            .or_insert((st.score, f));
-                    }
-                    continue;
-                }
-                for &e in &edges_by_pos[st.pos] {
-                    if let Some(wn) = trie.child(st.wnode, e.a) {
-                        let fluency = match (st.prev2, st.prev) {
-                            (_, None) => self.model.start_weight(e.a),
-                            (None, Some(b)) => self.model.bigram_weight(b, e.a),
-                            (Some(a), Some(b)) => self.model.trigram_weight(a, b, e.a),
-                        };
-                        let score = st.score + e.w as f64 + fluency * self.config.lm_weight;
-                        let cell = PathCell {
-                            parent: st.path,
-                            akshara: e.a,
-                        };
-                        let idx = arena.len() as u32;
-                        arena.push(cell);
-                        next.push(St {
-                            pos: st.pos + e.len,
-                            prev: Some(e.a),
-                            prev2: st.prev,
-                            score,
-                            path: Some(idx),
-                            wnode: wn,
-                        });
-                    }
-                }
-            }
-            // Trie node identity subsumes the path hash: a node is reached by
-            // exactly one akshara sequence.  Dedup by (pos, prev2, prev, node).
-            next.sort_by(|a, b| {
-                a.pos
-                    .cmp(&b.pos)
-                    .then_with(|| a.prev.cmp(&b.prev))
-                    .then_with(|| a.prev2.cmp(&b.prev2))
-                    .then_with(|| a.wnode.cmp(&b.wnode))
-                    .then_with(|| a.score.total_cmp(&b.score))
-            });
-            next.dedup_by(|a, b| {
-                a.pos == b.pos && a.prev == b.prev && a.prev2 == b.prev2 && a.wnode == b.wnode
-            });
-            next.sort_by(|a, b| a.score.total_cmp(&b.score));
-            next.truncate(self.config.beam_width.max(64) * 2);
-            beam = next;
-        }
-
-        let mut out: Vec<(String, f64, u32)> =
-            seen.into_iter().map(|(d, (s, f))| (d, s, f)).collect();
-        out.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-        out.truncate(k);
-        out
-    }
-
-    /// W3: candidate generation constrained to valid dictionary words with detailed scores.
+    /// Decode restricted to real words: the lattice intersected with the word
+    /// trie.  Every edge must extend the current trie node, and only paths
+    /// that end on a word (a trie terminal) are returned.
+    ///
+    /// Same position-synchronous search as [`Self::decode_detailed`].  A trie
+    /// node identifies its akshara sequence, so paths in one stack recombine
+    /// by node: the cheapest segmentation of each word prefix survives.
     pub fn decode_in_words_detailed(
         &self,
         roman: &str,
@@ -412,114 +319,116 @@ impl ModelDecoder {
         trie: &crate::core::wordtrie::WordTrie,
     ) -> Vec<DecodedCandidate> {
         let roman = roman.to_ascii_lowercase();
+        if !roman.is_ascii() {
+            return vec![];
+        }
         let edges_by_pos = self.build_edges(&roman);
         let m = roman.len();
         if m == 0 {
             return vec![];
         }
         let k = k.max(1);
+        // Most edges die on the trie, so a wider beam is nearly free here.
+        let width = self.config.beam_width.max(64) * 2;
 
-        let mut arena: Vec<PathCell> = Vec::with_capacity(256);
-        #[derive(Clone)]
-        struct St {
-            pos: usize,
-            prev: Option<u32>,
+        struct Hyp {
             prev2: Option<u32>,
+            prev: Option<u32>,
             score: f64,
             emit: f64,
             lm: f64,
-            path: Option<u32>,
+            parent: Option<u32>,
             wnode: usize,
         }
-        let mut beam = vec![St {
-            pos: 0,
-            prev: None,
+        let mut arena: Vec<PathCell> = Vec::with_capacity(256);
+        let mut stacks: Vec<Vec<Hyp>> = (0..=m).map(|_| Vec::new()).collect();
+        stacks[0].push(Hyp {
             prev2: None,
+            prev: None,
             score: 0.0,
             emit: 0.0,
             lm: 0.0,
-            path: None,
+            parent: None,
             wnode: 0,
-        }];
-        let mut seen: FxHashMap<String, (f64, f64, f64, usize)> = FxHashMap::default();
+        });
+        let prune = |stack: &mut Vec<Hyp>| {
+            stack.sort_unstable_by(|a, b| a.wnode.cmp(&b.wnode).then(a.score.total_cmp(&b.score)));
+            stack.dedup_by_key(|h| h.wnode);
+            if stack.len() > width {
+                stack.select_nth_unstable_by(width, |a, b| a.score.total_cmp(&b.score));
+                stack.truncate(width);
+            }
+        };
 
-        for _step in 0..MAX_STEPS {
-            if beam.is_empty() {
-                break;
+        for pos in 0..m {
+            let mut stack = std::mem::take(&mut stacks[pos]);
+            if stack.is_empty() {
+                continue;
             }
-            let mut next: Vec<St> = Vec::with_capacity(beam.len() * 8);
-            for st in &beam {
-                if st.pos == m {
-                    if trie.freq(st.wnode).is_some() {
-                        let (dev, aks_cnt) = self.reconstruct(&arena, st.path);
-                        seen.entry(dev)
-                            .and_modify(|best| {
-                                if st.score < best.0 {
-                                    *best = (st.score, st.emit, st.lm, aks_cnt);
-                                }
-                            })
-                            .or_insert((st.score, st.emit, st.lm, aks_cnt));
-                    }
-                    continue;
-                }
-                for &e in &edges_by_pos[st.pos] {
-                    if let Some(wn) = trie.child(st.wnode, e.a) {
-                        let fluency = match (st.prev2, st.prev) {
-                            (_, None) => self.model.start_weight(e.a),
-                            (None, Some(b)) => self.model.bigram_weight(b, e.a),
-                            (Some(a), Some(b)) => self.model.trigram_weight(a, b, e.a),
-                        };
-                        let emit = st.emit + e.w as f64;
-                        let lm = st.lm + fluency;
-                        let score = emit + lm * self.config.lm_weight;
-                        let cell = PathCell {
-                            parent: st.path,
-                            akshara: e.a,
-                        };
-                        let idx = arena.len() as u32;
-                        arena.push(cell);
-                        next.push(St {
-                            pos: st.pos + e.len,
-                            prev: Some(e.a),
-                            prev2: st.prev,
-                            score,
-                            emit,
-                            lm,
-                            path: Some(idx),
-                            wnode: wn,
+            prune(&mut stack);
+            for h in stack {
+                let path = match h.prev {
+                    Some(a) => {
+                        arena.push(PathCell {
+                            parent: h.parent,
+                            akshara: a,
                         });
+                        Some(arena.len() as u32 - 1)
                     }
+                    None => None,
+                };
+                for &e in &edges_by_pos[pos] {
+                    let Some(wn) = trie.child(h.wnode, e.a) else {
+                        continue;
+                    };
+                    let fluency = match (h.prev2, h.prev) {
+                        (_, None) => self.model.start_weight(e.a),
+                        (None, Some(b)) => self.model.bigram_weight(b, e.a),
+                        (Some(a), Some(b)) if !crate::core::ablation::no_trigram() => {
+                            self.model.trigram_weight(a, b, e.a)
+                        }
+                        (Some(_), Some(b)) => self.model.bigram_weight(b, e.a),
+                    };
+                    let emit = h.emit + e.w as f64;
+                    let lm = h.lm + fluency;
+                    stacks[pos + e.len].push(Hyp {
+                        prev2: h.prev,
+                        prev: Some(e.a),
+                        score: emit + lm * self.config.lm_weight,
+                        emit,
+                        lm,
+                        parent: path,
+                        wnode: wn,
+                    });
                 }
             }
-            next.sort_by(|a, b| {
-                a.pos
-                    .cmp(&b.pos)
-                    .then_with(|| a.prev.cmp(&b.prev))
-                    .then_with(|| a.prev2.cmp(&b.prev2))
-                    .then_with(|| a.wnode.cmp(&b.wnode))
-                    .then_with(|| a.score.total_cmp(&b.score))
-            });
-            next.dedup_by(|a, b| {
-                a.pos == b.pos && a.prev == b.prev && a.prev2 == b.prev2 && a.wnode == b.wnode
-            });
-            next.sort_by(|a, b| a.score.total_cmp(&b.score));
-            next.truncate(self.config.beam_width.max(64) * 2);
-            beam = next;
         }
 
-        let mut out: Vec<DecodedCandidate> = seen
-            .into_iter()
-            .map(|(dev, (_, emit, lm, akshara_count))| DecodedCandidate {
+        let mut done = std::mem::take(&mut stacks[m]);
+        done.sort_unstable_by(|a, b| a.wnode.cmp(&b.wnode).then(a.score.total_cmp(&b.score)));
+        done.dedup_by_key(|h| h.wnode);
+        let mut out: Vec<DecodedCandidate> = Vec::new();
+        for h in done {
+            let (Some(last), Some(_)) = (h.prev, trie.freq(h.wnode)) else {
+                continue;
+            };
+            arena.push(PathCell {
+                parent: h.parent,
+                akshara: last,
+            });
+            let (dev, akshara_count) = self.reconstruct(&arena, Some(arena.len() as u32 - 1));
+            let eow = self.model.end_weight(h.prev2, h.prev);
+            out.push(DecodedCandidate {
                 dev,
-                emit,
-                lm,
+                emit: h.emit,
+                lm: h.lm + eow,
                 akshara_count,
-            })
-            .collect();
+            });
+        }
         out.sort_by(|a, b| {
             let at = a.emit + a.lm * self.config.lm_weight;
             let bt = b.emit + b.lm * self.config.lm_weight;
-            at.total_cmp(&bt)
+            at.total_cmp(&bt).then_with(|| a.dev.cmp(&b.dev))
         });
         out.truncate(k);
         out
@@ -637,6 +546,34 @@ mod tests {
         assert!(!res.is_empty());
         assert!(res.iter().any(|(d, _)| d == "नमस्ते"));
         assert_eq!(res[0].0, "नमस्ते");
+    }
+
+    #[test]
+    fn completing_a_word_pays_the_end_of_word_transition() {
+        // कि only ever starts words here, की only ever ends them.  The LM
+        // learns P(</w> | .. की) >> P(</w> | .. कि); a decoder that never
+        // charges the end-of-word transition cannot use that, and a packer
+        // that prunes </w> erases it (both shipped before this test).
+        let model = trained_model(&[
+            ("kitab", "किताब"),
+            ("kinara", "किनारा"),
+            ("kisan", "किसान"),
+            ("naki", "नकी"),
+            ("baki", "बकी"),
+            ("saki", "सकी"),
+            ("ki", "कि"),
+            ("ki", "की"),
+        ]);
+        let short = model.akshara_id("कि").unwrap();
+        let long = model.akshara_id("की").unwrap();
+        let na = model.akshara_id("न").unwrap();
+        assert!(
+            model.end_weight(Some(na), Some(long)) < model.end_weight(Some(na), Some(short)),
+            "ending in की must be cheaper than ending in कि"
+        );
+        let dec = ModelDecoder::new(model);
+        let res = dec.decode("naki", 5);
+        assert_eq!(res[0].0, "नकी", "word-final 'ki' should end in की: {res:?}");
     }
 
     #[test]

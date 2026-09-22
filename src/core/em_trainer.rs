@@ -201,7 +201,7 @@ impl Trainer {
         // (§6.6, §12, MANUAL.md).  The </w> token is never emitted at decode
         // time: it carries no Roman chunk and is excluded from the reverse
         // index when building the lattice.
-        let eow_id = self.intern_akshara("</w>");
+        let eow_id = self.intern_akshara(crate::core::translit_model::END_OF_WORD);
         let aks_with_eow: Vec<u32> = aks.iter().copied().chain(std::iter::once(eow_id)).collect();
         // Continuation counts are TYPE counts: they must increment exactly once,
         // on the first time an n-gram is seen.  Keying that off `*e == 0` breaks
