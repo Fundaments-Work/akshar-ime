@@ -115,17 +115,27 @@ Browser: build the engine for the web (`make wasm`), served by the standalone pl
 make data-fetch SET=aksharantar        # pinned, checksummed source data
 make data-fetch SET=indiccorp-v2-sample
 make data-prepare                      # builds data/pairs/{train,valid,test}.jsonl
+make lexicon                           # builds data/lexicon.bin
+make train-full                        # ~4h; train-mid (~40min) for a faster check
+make model                             # calibrate blend + fit the size budget -> data/akshar.model
 make test                              # tests, including the accuracy regression guard
 make eval-langs                        # per-language IME metrics (this README's table)
 cargo run --release --bin eval_session -- --lang-aware   # cold vs. session accuracy
-make eval-full     # bootstrap CIs, MRR, per-query latency (single-language harness)
-make eval-errors   # oracle curves, error taxonomy, CER, collision bound
-make ablate        # component contributions
 ```
 
-Training (`make train-mid`, `make train-full`) is documented in the manual.
-Note that `--reranker-pairs` sizes the reranker's training set only — the EM
-model and language model always use all pairs, all 8 languages.
+`data/` is gitignored — none of the above exists after a plain clone, and
+`make release` still builds without it (`build.rs` degrades gracefully).
+Each step above is independently re-runnable; `train`/`train-full` auto-detect
+the files `data-prepare`/`lexicon` produce over the single-language
+predecessor. Verified end-to-end at `--smoke` scale
+(`cargo run --release --bin train -- --smoke`, ~6s, exercises every stage of
+the same code) rather than by timing the full 4h run; CI builds and tests the
+code but does not run this pipeline. `--reranker-pairs` (set by the
+`train-*` targets) sizes the reranker's training set only — the EM model,
+language model and lexicon always use everything available.
+
+Legacy single-language harness, kept for historical comparability
+(`docs/MANUAL.md` §12.6): `make eval-full`, `make eval-errors`, `make ablate`.
 
 ## Honest limitations
 

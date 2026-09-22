@@ -59,12 +59,56 @@ Chapter 13 include the components that turned out to contribute nothing.
 
 ## Reproducing everything in this manual
 
+`data/` is entirely gitignored (§17) — a fresh clone has the code and no
+data or model. Two things are reproducible from it, and they are different
+claims: that the code builds and its unit tests pass (seconds, no network),
+and that the shipped `data/akshar.model` and every number in §2.3/§12 can be
+regenerated from public data (hours, real bandwidth). Both are exercised
+below; CI (`.github/workflows/ci.yml`) runs only the first -- it does not
+fetch data, train, or check that the from-scratch sequence below still works.
+
 ```sh
-make release        # build the engine
-make test           # unit + integration tests, including the accuracy guard
-make eval           # accuracy by split
-make eval-full      # accuracy with bootstrap CIs and per-query latency
-make eval-errors    # oracle curves, error taxonomy, CER, collision bound
+make release        # build the engine -- no data needed (build.rs, §17)
+make test            # unit + integration tests, including the accuracy guard
+```
+
+**From-scratch model**, in order (each step is idempotent; re-run any one
+after a code change without repeating the ones before it):
+
+```sh
+make data-fetch SET=aksharantar             # ~229 MB, pinned + SHA-256 verified
+make data-fetch SET=indiccorp-v2-sample     # ~300 MB/language, same
+make data-prepare                           # -> data/pairs/{train,valid,test}.jsonl
+make lexicon                                # -> data/lexicon.bin (§8.6)
+make train-full                             # ~4h; train-mid (~40min) for a faster, weaker check
+make model                                  # calibrate blend + fit the size budget -> data/akshar.model
+```
+
+`train`/`train-full`/`train-mid` auto-detect the multi-language pairs and
+lexicon above over the single-language predecessor if present (whichever
+exists), and write `data/akshar.model` directly; `make model` (calibrate
+then promote, each independently re-runnable) is what turns that into the
+artifact this manual reports on -- a raw `train-full` output has neither a
+calibrated per-language blend (§8.6) nor the desktop size budget applied
+(§10.4), and the numbers in §2.3 are measured after both.
+
+The full sequence above was not run end-to-end while writing this revision
+(train-full alone is ~4h); what was verified directly is that `train`,
+`calibrate` and `promote` correctly auto-detect and chain
+(`cargo run --release --bin train -- --smoke`, a ~6-second synthetic-scale
+run exercising every stage of the same code path, immediately followed by
+`make calibrate` and `make promote` against its output). The from-scratch
+wall-clock times above are the targets' own documented estimates, not
+independently timed this session.
+
+**Measuring it:**
+
+```sh
+make eval-langs                    # §2.3's table: per-language top-1/in-list/MRR (needs data-prepare)
+cargo run --release --bin eval_session -- --lang-aware   # §12.10: cold vs. session accuracy
+make eval           # legacy single-language accuracy by split
+make eval-full      # legacy: bootstrap CIs and per-query latency
+make eval-errors    # legacy: oracle curves, error taxonomy, CER, collision bound
 ```
 
 Component ablations are switched at runtime; see §13.1.

@@ -29,7 +29,7 @@ TRIGRAM_THRESHOLD ?= 3e-2
         restart-ibus help wasm wasm-clean release-upload pack web-model \
         train train-quick train-mid train-full eval eval-full eval-ime eval-errors \
         ablate manual docs check check-native check-wasm release-check data-fetch \
-        data-prepare eval-langs
+        data-prepare eval-langs lexicon calibrate promote model
 # --- Main Targets ---
 
 all: release  ## Build the engine for release (default).
@@ -128,13 +128,20 @@ data-prepare:  ## Build data/pairs/{train,valid,test}.jsonl (all Devanagari lang
 	done
 	@cargo run --release --bin prepare_pairs
 
+lexicon:  ## Build data/lexicon.bin from the IndicCorp v2 sample (needs data-fetch SET=indiccorp-v2-sample).
+	@cargo run --release --bin build_lexicon
+
 # --- Training -----------------------------------------------------------------
 #
 # NOTE: --reranker-pairs sizes the DISCRIMINATIVE RERANKER's training set only.
-# The EM emission model and the Kneser-Ney syllable LM always ingest all
-# 3,588,793 parallel pairs, and the vocabulary always comes from the full
-# corpus, regardless of which target you run.  These targets differ only in how
-# much ranking supervision the sparse table sees.
+# The EM emission model, the Kneser-Ney syllable LM and the vocabulary/lexicon
+# always ingest everything available regardless of which target you run --
+# these targets differ only in how much ranking supervision the sparse table
+# sees. `train` auto-detects data/pairs/train.jsonl over the legacy
+# data/aksharantar/train_devanagari.jsonl (multi-language over single), and
+# data/lexicon.bin over the legacy single-corpus vocabulary, whichever exists
+# -- run data-prepare and lexicon first for the multi-language model this
+# manual and README report; skip them for the single-language predecessor.
 #
 # Chunked mode (and therefore the per-batch learning-rate schedule) engages
 # above 200k pairs, so train-quick does NOT exercise it -- use train-mid to
@@ -152,8 +159,34 @@ train-mid-att:  ## train-mid + attestation-weighted EM/LM (tests convention domi
 
 train: train-mid  ## Alias for train-mid.
 
-train-full:  ## Reranker on all 3.59M pairs (36 batches, ~4h). Watch the dev loss.
+train-full:  ## Reranker on all pairs (~4h on the multi-language set; watch the dev loss).
 	@cargo run --release --bin train -- --reranker-pairs 0 --epochs 5 --iterations 12
+
+# `train`/`train-full` write data/akshar.model directly (auto-detected paths
+# above) but without a calibrated blend or a size budget applied. calibrate
+# and promote turn that into the artifact this repo actually ships; `make
+# model` is both, in order, on top of whichever train target you already ran.
+
+calibrate:  ## Calibrate the heuristic/learned blend weight per language on validation, in place.
+	@cargo run --release --bin calibrate_blend -- --model data/akshar.model --out data/akshar.model
+
+# Relative-entropy trigram-LM pruning threshold for the DESKTOP container
+# (separate from the browser's TRIGRAM_THRESHOLD below, though both default
+# to the same value here). Only the lexicon-backed multi-language model needs
+# this -- it is what keeps an 8-language, ~37 MB unpruned container under the
+# ~25 MB budget. Measured cost at this value: pooled native top-1 60.69% vs.
+# 62.61% unpruned (-1.9pp for -13 MB; docs/MANUAL.md SS10.4). Raise it for a
+# smaller/less accurate container, lower it (down to the unpruned model) for
+# the reverse; 0 disables pruning.
+DESKTOP_TRIGRAM_THRESHOLD ?= 3e-2
+
+promote:  ## Prune data/akshar.model in place to fit the desktop size budget.
+	@cargo run --release --bin prune_lm -- --model data/akshar.model \
+		--trigram-threshold $(DESKTOP_TRIGRAM_THRESHOLD) --out data/akshar.model.tmp
+	@mv data/akshar.model.tmp data/akshar.model
+	@ls -lh data/akshar.model
+
+model: calibrate promote  ## Finish a model trained by train/train-mid/train-full: calibrate, then fit the size budget.
 
 # --- Evaluation ---------------------------------------------------------------
 
