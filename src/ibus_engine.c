@@ -1,326 +1,381 @@
-// src/ibus_engine.c
+// src/ibus_engine.c — IBus front end for the Akshar engine (Rust, via c_api.rs).
+//
+// The Rust engine owns every language decision; this file only turns key
+// events into three actions: extend the roman preedit, commit a word, commit
+// a symbol.  Two invariants hold for every key:
+//
+//   * nothing typed is ever lost — if the engine has no answer, the raw text
+//     is committed;
+//   * text is committed in the order it was typed — a symbol never reaches
+//     the application while a word is still pending in the preedit.
+//
+// IBusText ownership: ibus_text_new_from_string() returns a floating
+// reference, and ibus_engine_commit_text() / ibus_engine_update_preedit_text()
+// release floating text themselves.  Never unref text after handing it over.
+
 #include <ibus.h>
 #include <jansson.h>
-#include <stdio.h>
 #include <string.h>
-#include <stdarg.h>
 
-// --- Rust FFI function declarations ---
+// --- Rust FFI (src/c_api.rs) ---
 void akshar_ime_engine_init(void);
 void akshar_ime_engine_destroy(void);
 char *akshar_ime_get_suggestions(const char *prefix);
 void akshar_ime_confirm_word(const char *roman, const char *devanagari);
+int akshar_ime_set_language(const char *code);
 void akshar_ime_free_string(char *s);
 
-// --- GObject Boilerplate ---
+// Engine names registered with IBus (devanagari-smart.xml): the bare name is
+// "auto" (language-blind ranking); a suffix is the language the source ranks
+// for, e.g. "devanagari-smart-hi".
+#define ENGINE_BASE_NAME "devanagari-smart"
+static const char *const LANGUAGE_SUFFIXES[] = {"hi", "ne", "mr", "sa", "kok", "mai", "brx", "doi"};
+
+// --- GObject boilerplate ---
 typedef struct _IBusDevanagariEngine IBusDevanagariEngine;
 typedef struct _IBusDevanagariEngineClass IBusDevanagariEngineClass;
 struct _IBusDevanagariEngine
 {
     IBusEngine parent;
     IBusLookupTable *table;
-    GString *preedit_string;
+    GString *preedit;
 };
 struct _IBusDevanagariEngineClass
 {
     IBusEngineClass parent;
 };
-static guint g_engine_instance_count = 0;
-static void ibus_devanagari_engine_class_init(IBusDevanagariEngineClass *klass);
-static void ibus_devanagari_engine_init_instance(IBusDevanagariEngine *engine);
-static void ibus_devanagari_engine_finalize(GObject *object);
-static gboolean ibus_devanagari_engine_process_key_event(IBusEngine *engine, guint keyval, guint keycode, guint modifiers);
-static void ibus_devanagari_engine_candidate_clicked(IBusEngine *engine, guint index, guint button, guint state);
+
 G_DEFINE_TYPE(IBusDevanagariEngine, ibus_devanagari_engine, IBUS_TYPE_ENGINE)
 #define IBUS_TYPE_DEVANAGARI_ENGINE (ibus_devanagari_engine_get_type())
 
-// --- Initialization and Finalization ---
-static void ibus_devanagari_engine_class_init(IBusDevanagariEngineClass *klass)
+// One Rust engine per process, shared by every IBus engine instance.
+static guint g_instances = 0;
+
+// --- Engine calls ---
+
+// The engine's suggestions for `input` as a JSON array; NULL on failure.
+static json_t *suggestions(const char *input)
 {
-    IBusEngineClass *engine_class = IBUS_ENGINE_CLASS(klass);
-    GObjectClass *object_class = G_OBJECT_CLASS(klass);
-    engine_class->process_key_event = ibus_devanagari_engine_process_key_event;
-    engine_class->candidate_clicked = ibus_devanagari_engine_candidate_clicked;
-    object_class->finalize = ibus_devanagari_engine_finalize;
-}
-static void ibus_devanagari_engine_init_instance(IBusDevanagariEngine *engine)
-{
-    engine->preedit_string = g_string_new("");
-    engine->table = ibus_lookup_table_new(10, 0, TRUE, TRUE);
-    g_object_ref_sink(engine->table);
-    if (g_engine_instance_count == 0)
+    char *json = akshar_ime_get_suggestions(input);
+    if (!json)
+        return NULL;
+    json_t *root = json_loads(json, 0, NULL);
+    akshar_ime_free_string(json);
+    if (root && !json_is_array(root))
     {
-        akshar_ime_engine_init();
+        json_decref(root);
+        return NULL;
     }
-    g_engine_instance_count++;
-}
-static void ibus_devanagari_engine_init(IBusDevanagariEngine *engine) { ibus_devanagari_engine_init_instance(engine); }
-static void ibus_devanagari_engine_finalize(GObject *object)
-{
-    IBusDevanagariEngine *self = (IBusDevanagariEngine *)object;
-    // Exp 4: previously leaked preedit_string + table on every engine switch.
-    if (self->table) {
-        g_object_unref(self->table);
-        self->table = NULL;
-    }
-    if (self->preedit_string) {
-        g_string_free(self->preedit_string, TRUE);
-        self->preedit_string = NULL;
-    }
-    g_engine_instance_count--;
-    if (g_engine_instance_count == 0)
-    {
-        akshar_ime_engine_destroy();
-    }
-    G_OBJECT_CLASS(ibus_devanagari_engine_parent_class)->finalize(object);
+    return root;
 }
 
-// --- Core IME Logic ---
-static void clear_preedit(IBusDevanagariEngine *devanagari_engine)
+// The engine's first suggestion for `input` (g_free it), or NULL.
+static gchar *top_suggestion(const char *input)
 {
-    g_string_set_size(devanagari_engine->preedit_string, 0);
-    ibus_engine_hide_preedit_text((IBusEngine *)devanagari_engine);
-    ibus_engine_hide_lookup_table((IBusEngine *)devanagari_engine);
+    json_t *root = suggestions(input);
+    gchar *out = NULL;
+    if (root && json_array_size(root) > 0 && json_is_string(json_array_get(root, 0)))
+        out = g_strdup(json_string_value(json_array_get(root, 0)));
+    if (root)
+        json_decref(root);
+    return out;
 }
 
-static void update_preedit_and_lookup(IBusDevanagariEngine *devanagari_engine)
+static void commit_string(IBusEngine *engine, const gchar *s)
 {
-    IBusEngine *engine = (IBusEngine *)devanagari_engine;
-    const char *preedit_str = devanagari_engine->preedit_string->str;
+    ibus_engine_commit_text(engine, ibus_text_new_from_string(s));
+}
 
-    if (strlen(preedit_str) == 0)
+// --- Preedit and lookup table ---
+
+static void clear_preedit(IBusDevanagariEngine *self)
+{
+    g_string_truncate(self->preedit, 0);
+    ibus_lookup_table_clear(self->table);
+    ibus_engine_hide_preedit_text((IBusEngine *)self);
+    ibus_engine_hide_lookup_table((IBusEngine *)self);
+}
+
+static void update_preedit_and_lookup(IBusDevanagariEngine *self)
+{
+    IBusEngine *engine = (IBusEngine *)self;
+    if (self->preedit->len == 0)
     {
-    clear_preedit(devanagari_engine);
+        clear_preedit(self);
         return;
     }
+    const gchar *roman = self->preedit->str;
+    ibus_engine_update_preedit_text(engine, ibus_text_new_from_string(roman),
+                                    g_utf8_strlen(roman, -1), TRUE);
 
-    IBusText *preedit_text = ibus_text_new_from_string(preedit_str);
-    ibus_engine_update_preedit_text(engine, preedit_text, g_utf8_strlen(preedit_str, -1), TRUE);
-    ibus_lookup_table_clear(devanagari_engine->table);
-
-    char *suggestions_json = akshar_ime_get_suggestions(preedit_str);
-    if (!suggestions_json)
-        return;
-    json_error_t error;
-    json_t *root = json_loads(suggestions_json, 0, &error);
-
-    if (root && json_is_array(root))
+    ibus_lookup_table_clear(self->table);
+    json_t *root = suggestions(roman);
+    if (root)
     {
         size_t i;
         json_t *value;
         json_array_foreach(root, i, value)
         {
             if (json_is_string(value))
-            {
-                IBusText *candidate_text = ibus_text_new_from_string(json_string_value(value));
-                ibus_lookup_table_append_candidate(devanagari_engine->table, candidate_text);
-            }
+                ibus_lookup_table_append_candidate(
+                    self->table, ibus_text_new_from_string(json_string_value(value)));
         }
         json_decref(root);
     }
-    akshar_ime_free_string(suggestions_json);
-
-    if (ibus_lookup_table_get_number_of_candidates(devanagari_engine->table) > 0)
-    {
-        ibus_engine_update_lookup_table(engine, devanagari_engine->table, TRUE);
-    }
+    if (ibus_lookup_table_get_number_of_candidates(self->table) > 0)
+        ibus_engine_update_lookup_table(engine, self->table, TRUE);
     else
-    {
         ibus_engine_hide_lookup_table(engine);
-    }
 }
 
-// Commits the currently selected candidate or the top suggestion if none is selected.
-static void commit_best_candidate(IBusDevanagariEngine *devanagari_engine)
+// Commit the highlighted candidate (the top one unless the user moved the
+// cursor) and teach it to the engine.  With no candidate at all the typed
+// roman is committed as-is rather than dropped.
+static void commit_preedit(IBusDevanagariEngine *self)
 {
-    if (devanagari_engine->preedit_string->len == 0)
+    if (self->preedit->len == 0)
         return;
+    gchar *roman = g_strdup(self->preedit->str);
+    gchar *word = NULL;
 
-    const char *preedit_for_confirm = g_strdup(devanagari_engine->preedit_string->str);
-    IBusText *commit_text = NULL;
-
-    // First, try to get the user-selected candidate (bounds-checked: the
-    // table may have been repopulated since the cursor moved).
-    guint n_candidates = ibus_lookup_table_get_number_of_candidates(devanagari_engine->table);
-    guint index = ibus_lookup_table_get_cursor_pos(devanagari_engine->table);
-    if (index < n_candidates)
-        commit_text = ibus_lookup_table_get_candidate(devanagari_engine->table, index);
-    if (commit_text)
+    guint n = ibus_lookup_table_get_number_of_candidates(self->table);
+    guint cursor = ibus_lookup_table_get_cursor_pos(self->table);
+    if (cursor < n)
     {
-        g_object_ref(commit_text); // Increment ref count because we are using it
+        // Owned by the table (transfer none): copy the string, keep the object.
+        IBusText *cand = ibus_lookup_table_get_candidate(self->table, cursor);
+        if (cand && cand->text)
+            word = g_strdup(cand->text);
     }
+    if (!word)
+        word = top_suggestion(roman);
 
-    // If no candidate is selected, fetch the top suggestion directly from Rust
-    if (!commit_text)
-    {
-    char *suggestions_json = akshar_ime_get_suggestions(preedit_for_confirm);
-        if (!suggestions_json)
-        {
-            g_free((gpointer)preedit_for_confirm);
-            return;
-        }
-        json_error_t error;
-        json_t *root = json_loads(suggestions_json, 0, &error);
-        if (root && json_is_array(root) && json_array_size(root) > 0)
-        {
-            json_t *first = json_array_get(root, 0);
-            if (json_is_string(first))
-            {
-                commit_text = ibus_text_new_from_string(json_string_value(first));
-            }
-        }
-        if (root)
-            json_decref(root);
-    akshar_ime_free_string(suggestions_json);
-    }
-
-    if (commit_text && commit_text->text)
-    {
-    ibus_engine_commit_text((IBusEngine *)devanagari_engine, commit_text);
-    akshar_ime_confirm_word(preedit_for_confirm, commit_text->text);
-    }
-
-    if (commit_text)
-    {
-        g_object_unref(commit_text);
-    }
-    g_free((gpointer)preedit_for_confirm);
-    clear_preedit(devanagari_engine);
+    commit_string((IBusEngine *)self, word ? word : roman);
+    if (word)
+        akshar_ime_confirm_word(roman, word);
+    g_free(word);
+    g_free(roman);
+    clear_preedit(self);
 }
 
-static void ibus_devanagari_engine_candidate_clicked(IBusEngine *engine, guint index, guint button, guint state)
-{
-    ibus_lookup_table_set_cursor_pos(((IBusDevanagariEngine *)engine)->table, index);
-    commit_best_candidate((IBusDevanagariEngine *)engine);
-}
+// --- Key handling ---
 
-// --- RE-ARCHITECTED: The main key event processor ---
-static gboolean ibus_devanagari_engine_process_key_event(IBusEngine *engine, guint keyval, guint keycode, guint modifiers)
+static gboolean ibus_devanagari_engine_process_key_event(IBusEngine *engine, guint keyval,
+                                                         guint keycode, guint modifiers)
 {
-    IBusDevanagariEngine *devanagari_engine = (IBusDevanagariEngine *)engine;
+    IBusDevanagariEngine *self = (IBusDevanagariEngine *)engine;
+    (void)keycode;
 
-    if ((modifiers & IBUS_RELEASE_MASK) || (modifiers & (IBUS_CONTROL_MASK | IBUS_MOD1_MASK)))
-    {
+    if (modifiers & IBUS_RELEASE_MASK)
         return FALSE;
-    }
+    // Application shortcuts (Ctrl/Alt/Super + key) are not text: let them
+    // through untouched.
+    if (modifiers & (IBUS_CONTROL_MASK | IBUS_MOD1_MASK | IBUS_SUPER_MASK))
+        return FALSE;
 
-    gboolean has_preedit = (devanagari_engine->preedit_string->len > 0);
-    gboolean has_candidates = ibus_lookup_table_get_number_of_candidates(devanagari_engine->table) > 0;
+    gboolean has_preedit = self->preedit->len > 0;
 
-    // --- Punctuation and Symbol Handling ---
-    // Check for symbols that should immediately commit.
-    if (keyval == IBUS_KEY_period || keyval == IBUS_KEY_question || keyval == IBUS_KEY_comma ||
-        (keyval >= IBUS_KEY_0 && keyval <= IBUS_KEY_9))
-    {
-        if (has_preedit)
-        {
-            commit_best_candidate(devanagari_engine);
-        }
-        // Now, transliterate and commit the symbol itself
-        char symbol_str[2] = {(char)keyval, '\0'};
-        char *suggestions_json = akshar_ime_get_suggestions(symbol_str);
-        if (!suggestions_json)
-            return TRUE;
-        json_error_t error;
-        json_t *root = json_loads(suggestions_json, 0, &error);
-        if (root && json_is_array(root) && json_array_size(root) > 0)
-        {
-            json_t *first = json_array_get(root, 0);
-            if (json_is_string(first))
-            {
-                IBusText *text = ibus_text_new_from_string(json_string_value(first));
-                ibus_engine_commit_text(engine, text);
-                g_object_unref(text);
-            }
-        }
-        if (root)
-            json_decref(root);
-    akshar_ime_free_string(suggestions_json);
-        return TRUE; // Consume the key event
-    }
-
-    // --- Candidate Navigation ---
-    if (has_candidates)
+    if (has_preedit && ibus_lookup_table_get_number_of_candidates(self->table) > 0)
     {
         switch (keyval)
         {
         case IBUS_KEY_Up:
-            ibus_lookup_table_cursor_up(devanagari_engine->table);
-            ibus_engine_update_lookup_table(engine, devanagari_engine->table, TRUE);
+            ibus_lookup_table_cursor_up(self->table);
+            ibus_engine_update_lookup_table(engine, self->table, TRUE);
             return TRUE;
         case IBUS_KEY_Down:
-            ibus_lookup_table_cursor_down(devanagari_engine->table);
-            ibus_engine_update_lookup_table(engine, devanagari_engine->table, TRUE);
+            ibus_lookup_table_cursor_down(self->table);
+            ibus_engine_update_lookup_table(engine, self->table, TRUE);
             return TRUE;
         }
     }
 
-    // --- Keypress Processing ---
     switch (keyval)
     {
     case IBUS_KEY_Return:
+    case IBUS_KEY_KP_Enter:
     case IBUS_KEY_space:
     case IBUS_KEY_Tab:
-        if (has_preedit)
-        {
-            commit_best_candidate(devanagari_engine);
-            return TRUE; // Consume the event to prevent extra space/enter.
-        }
-        return FALSE; // No preedit, so pass the key to the application.
-
+        // With a word pending the key only commits it; otherwise it is the
+        // application's.
+        if (!has_preedit)
+            return FALSE;
+        commit_preedit(self);
+        return TRUE;
     case IBUS_KEY_Escape:
-        if (has_preedit)
-        {
-            clear_preedit(devanagari_engine);
-            return TRUE;
-        }
-        return FALSE;
-
+        if (!has_preedit)
+            return FALSE;
+        clear_preedit(self);
+        return TRUE;
     case IBUS_KEY_BackSpace:
-        if (has_preedit)
-        {
-            // Exp 4: byte-truncate splits UTF-8. Step back one full character.
-            GString *s = devanagari_engine->preedit_string;
-            if (s->len > 0) {
-                const gchar *end = s->str + s->len;
-                const gchar *prev = g_utf8_prev_char(end);
-                g_string_truncate(s, prev - s->str);
-            }
-            update_preedit_and_lookup(devanagari_engine);
-            return TRUE;
-        }
-        return FALSE;
+        if (!has_preedit)
+            return FALSE;
+        // The preedit is ASCII, but step back a whole UTF-8 character anyway.
+        g_string_truncate(self->preedit,
+                          g_utf8_prev_char(self->preedit->str + self->preedit->len) -
+                              self->preedit->str);
+        update_preedit_and_lookup(self);
+        return TRUE;
     }
 
-    // --- Alphanumeric Input ---
-    if ((keyval >= IBUS_KEY_a && keyval <= IBUS_KEY_z) || (keyval >= IBUS_KEY_A && keyval <= IBUS_KEY_Z) || (keyval >= IBUS_KEY_0 && keyval <= IBUS_KEY_9))
+    // Letters build the roman word.
+    if (keyval < 0x80 && g_ascii_isalpha((gchar)keyval))
     {
-    g_string_append_c(devanagari_engine->preedit_string, (gchar)keyval);
-    update_preedit_and_lookup(devanagari_engine);
-    return TRUE;
+        g_string_append_c(self->preedit, (gchar)keyval);
+        update_preedit_and_lookup(self);
+        return TRUE;
     }
 
+    // Digits and punctuation: commit the pending word first, then the symbol
+    // as the engine maps it ('.' -> '।', digits -> Devanagari digits, the
+    // rest unchanged), falling back to the raw character.
+    if (keyval >= 0x21 && keyval <= 0x7e)
+    {
+        if (has_preedit)
+            commit_preedit(self);
+        gchar symbol[2] = {(gchar)keyval, '\0'};
+        gchar *mapped = top_suggestion(symbol);
+        commit_string(engine, mapped ? mapped : symbol);
+        g_free(mapped);
+        return TRUE;
+    }
+
+    // Cursor movement and editing keys belong to the application, but must
+    // not act while a word is pending in front of the cursor.  (Modifier keys
+    // such as Shift arrive as their own events and fall through untouched.)
+    switch (keyval)
+    {
+    case IBUS_KEY_Left:
+    case IBUS_KEY_Right:
+    case IBUS_KEY_Home:
+    case IBUS_KEY_End:
+    case IBUS_KEY_Page_Up:
+    case IBUS_KEY_Page_Down:
+    case IBUS_KEY_Delete:
+    case IBUS_KEY_Insert:
+        if (has_preedit)
+            commit_preedit(self);
+        break;
+    }
     return FALSE;
 }
 
-// --- Main Function (unchanged) ---
+static void ibus_devanagari_engine_candidate_clicked(IBusEngine *engine, guint index,
+                                                     guint button, guint state)
+{
+    IBusDevanagariEngine *self = (IBusDevanagariEngine *)engine;
+    (void)button;
+    (void)state;
+    guint page_start = ibus_lookup_table_get_cursor_pos(self->table) -
+                       ibus_lookup_table_get_cursor_in_page(self->table);
+    ibus_lookup_table_set_cursor_pos(self->table, page_start + index);
+    commit_preedit(self);
+}
+
+// Every input source shares one Rust engine, so each tells it its language
+// whenever it becomes the active source.
+static void apply_language(IBusEngine *engine)
+{
+    const gchar *name = ibus_engine_get_name(engine);
+    const gchar *lang = NULL;
+    if (name && g_str_has_prefix(name, ENGINE_BASE_NAME "-"))
+        lang = name + strlen(ENGINE_BASE_NAME "-");
+    akshar_ime_set_language(lang);
+}
+
+static void ibus_devanagari_engine_focus_in(IBusEngine *engine)
+{
+    apply_language(engine);
+    IBUS_ENGINE_CLASS(ibus_devanagari_engine_parent_class)->focus_in(engine);
+}
+
+static void ibus_devanagari_engine_enable(IBusEngine *engine)
+{
+    apply_language(engine);
+    IBUS_ENGINE_CLASS(ibus_devanagari_engine_parent_class)->enable(engine);
+}
+
+// Focus leaving or the engine being switched off must not lose the word.
+static void ibus_devanagari_engine_focus_out(IBusEngine *engine)
+{
+    commit_preedit((IBusDevanagariEngine *)engine);
+    IBUS_ENGINE_CLASS(ibus_devanagari_engine_parent_class)->focus_out(engine);
+}
+
+static void ibus_devanagari_engine_disable(IBusEngine *engine)
+{
+    commit_preedit((IBusDevanagariEngine *)engine);
+    IBUS_ENGINE_CLASS(ibus_devanagari_engine_parent_class)->disable(engine);
+}
+
+// The client asked for a reset (e.g. its text was replaced): drop the preedit.
+static void ibus_devanagari_engine_reset(IBusEngine *engine)
+{
+    clear_preedit((IBusDevanagariEngine *)engine);
+    IBUS_ENGINE_CLASS(ibus_devanagari_engine_parent_class)->reset(engine);
+}
+
+// --- Lifecycle ---
+
+static void ibus_devanagari_engine_init(IBusDevanagariEngine *self)
+{
+    self->preedit = g_string_new("");
+    self->table = ibus_lookup_table_new(10, 0, TRUE, TRUE);
+    g_object_ref_sink(self->table);
+    if (g_instances++ == 0)
+        akshar_ime_engine_init();
+}
+
+static void ibus_devanagari_engine_finalize(GObject *object)
+{
+    IBusDevanagariEngine *self = (IBusDevanagariEngine *)object;
+    g_clear_object(&self->table);
+    if (self->preedit)
+    {
+        g_string_free(self->preedit, TRUE);
+        self->preedit = NULL;
+    }
+    if (--g_instances == 0)
+        akshar_ime_engine_destroy();
+    G_OBJECT_CLASS(ibus_devanagari_engine_parent_class)->finalize(object);
+}
+
+static void ibus_devanagari_engine_class_init(IBusDevanagariEngineClass *klass)
+{
+    IBusEngineClass *engine_class = IBUS_ENGINE_CLASS(klass);
+    engine_class->process_key_event = ibus_devanagari_engine_process_key_event;
+    engine_class->candidate_clicked = ibus_devanagari_engine_candidate_clicked;
+    engine_class->focus_in = ibus_devanagari_engine_focus_in;
+    engine_class->enable = ibus_devanagari_engine_enable;
+    engine_class->focus_out = ibus_devanagari_engine_focus_out;
+    engine_class->disable = ibus_devanagari_engine_disable;
+    engine_class->reset = ibus_devanagari_engine_reset;
+    G_OBJECT_CLASS(klass)->finalize = ibus_devanagari_engine_finalize;
+}
+
 int main(int argc, char **argv)
 {
     ibus_init();
     IBusBus *bus = ibus_bus_new();
     if (!ibus_bus_is_connected(bus))
     {
+        g_object_unref(bus);
         return 1;
     }
     IBusFactory *factory = ibus_factory_new(ibus_bus_get_connection(bus));
-    ibus_factory_add_engine(factory, "devanagari-smart", IBUS_TYPE_DEVANAGARI_ENGINE);
-    if (argc > 1 && strcmp(argv[1], "--ibus") == 0)
+    ibus_factory_add_engine(factory, ENGINE_BASE_NAME, IBUS_TYPE_DEVANAGARI_ENGINE);
+    for (gsize i = 0; i < G_N_ELEMENTS(LANGUAGE_SUFFIXES); i++)
     {
-        if (!ibus_bus_request_name(bus, "org.freedesktop.IBus.AksharDevanagari", 0)) {
-            g_object_unref(factory);
-            g_object_unref(bus);
-            return 1;
-        }
+        gchar *name = g_strconcat(ENGINE_BASE_NAME "-", LANGUAGE_SUFFIXES[i], NULL);
+        ibus_factory_add_engine(factory, name, IBUS_TYPE_DEVANAGARI_ENGINE);
+        g_free(name);
+    }
+    if (argc > 1 && strcmp(argv[1], "--ibus") == 0 &&
+        !ibus_bus_request_name(bus, "org.freedesktop.IBus.AksharDevanagari", 0))
+    {
+        g_object_unref(factory);
+        g_object_unref(bus);
+        return 1;
     }
     ibus_main();
     g_object_unref(factory);
