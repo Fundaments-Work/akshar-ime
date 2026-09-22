@@ -1,0 +1,25 @@
+# Public datasets Akshar trains and evaluates on.
+#
+# Every file is pinned to an upstream revision and verified by SHA-256 (the
+# upstream Git LFS object id) before anything reads it.  `scripts/fetch-data.sh`
+# downloads into data/raw/<set>/<name>; `make data-fetch` is the entry point.
+#
+# Scope: every language Aksharantar publishes in the Devanagari script.
+# Kashmiri (kas) and Sindhi (sid) are Perso-Arabic there and are not listed.
+# The pairs train the engine and measure it per language (official
+# train/valid/test splits); only the trained model ships, never this data.
+#
+# Licences (as stated by the publishers):
+#   aksharantar   manually collected pairs CC-BY 4.0; mined (Samanantar,
+#                 IndicCorp) and existing-source pairs CC0.  Madhani et al.,
+#                 "Aksharantar", AI4Bharat 2022/2023.
+#
+# Columns (tab-separated): set  name  bytes  sha256  licence  url
+aksharantar	hin.zip	33100386	208c2d1b128234e6dc777b750779b4f5e6214ab43244039349b530bf9868bdaf	CC-BY-4.0/CC0	https://huggingface.co/datasets/ai4bharat/Aksharantar/resolve/e418c1fc928d9f5393af33268472cf20c1891be8/hin.zip
+aksharantar	mar.zip	41821084	47aab4119094f44e907d017a26aff5a33590bb42e115f19e79b957c5eb0056ef	CC-BY-4.0/CC0	https://huggingface.co/datasets/ai4bharat/Aksharantar/resolve/e418c1fc928d9f5393af33268472cf20c1891be8/mar.zip
+aksharantar	nep.zip	70147764	8bdcc5957d701ea36b63c00c713b43bc30902774b70736737d480e77929de92c	CC-BY-4.0/CC0	https://huggingface.co/datasets/ai4bharat/Aksharantar/resolve/e418c1fc928d9f5393af33268472cf20c1891be8/nep.zip
+aksharantar	san.zip	58641114	8cdc6e500743194116f9d40938c72f8995bd2e9073a7183bee9da3d3cb655168	CC-BY-4.0/CC0	https://huggingface.co/datasets/ai4bharat/Aksharantar/resolve/e418c1fc928d9f5393af33268472cf20c1891be8/san.zip
+aksharantar	kok.zip	17375655	c08a2896ef3b85f44937c6fcfa75fefdc0736ffb3deceaf0cf9cf64227cc85e9	CC-BY-4.0/CC0	https://huggingface.co/datasets/ai4bharat/Aksharantar/resolve/e418c1fc928d9f5393af33268472cf20c1891be8/kok.zip
+aksharantar	mai.zip	7070276	bef959e8b98c981d22c03c4a0e23cac25ca69b74c2cbc5bf8e5d0a2061ce3dfd	CC-BY-4.0/CC0	https://huggingface.co/datasets/ai4bharat/Aksharantar/resolve/e418c1fc928d9f5393af33268472cf20c1891be8/mai.zip
+aksharantar	brx.zip	953631	4117f9dab514ca613174fd0af6c79fcd74233c6f2a1916e8cc73de0f8ffc0d1b	CC-BY-4.0/CC0	https://huggingface.co/datasets/ai4bharat/Aksharantar/resolve/e418c1fc928d9f5393af33268472cf20c1891be8/brx.zip
+aksharantar	doi.zip	59706	a5f79317baa51be6815d89b1e10fd86c5456fb2877b26bdfb5b979b102b33885	CC-BY-4.0/CC0	https://huggingface.co/datasets/ai4bharat/Aksharantar/resolve/e418c1fc928d9f5393af33268472cf20c1891be8/doi.zip

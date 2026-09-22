@@ -28,7 +28,8 @@ TRIGRAM_THRESHOLD ?= 3e-2
 .PHONY: all release debug test install uninstall reinstall clean reset-learning \
         restart-ibus help wasm wasm-clean release-upload pack web-model \
         train train-quick train-mid train-full eval eval-full eval-ime eval-errors \
-        ablate manual docs check check-native check-wasm release-check
+        ablate manual docs check check-native check-wasm release-check data-fetch \
+        data-prepare
 # --- Main Targets ---
 
 all: release  ## Build the engine for release (default).
@@ -108,6 +109,24 @@ uninstall:  ## Remove the engine from the system.
 	@echo "\nUninstallation complete. Run 'make restart-ibus' (no sudo) to reload IBus."
 
 reinstall: uninstall install  ## Run uninstall and then install.
+
+# --- Data ---------------------------------------------------------------------
+#
+# Public datasets, pinned by upstream revision and SHA-256 in
+# scripts/data-manifest.tsv, downloaded resumably into data/raw/.  SET narrows
+# to one set, NAME to one file of it.  The Aksharantar word pairs for every
+# Devanagari language (~229 MB) train the engine and measure it per language;
+# only the trained model ships, never the downloaded data.
+
+data-fetch:  ## Download + verify the public datasets (SET=..., NAME=... to narrow).
+	@bash scripts/fetch-data.sh $(SET) $(NAME)
+
+data-prepare:  ## Build data/pairs/{train,valid,test}.jsonl (all Devanagari languages).
+	@for z in data/raw/aksharantar/*.zip; do \
+		l=$$(basename $$z .zip); mkdir -p data/raw/aksharantar/$$l; \
+		unzip -o -q -j $$z -d data/raw/aksharantar/$$l; \
+	done
+	@cargo run --release --bin prepare_pairs
 
 # --- Training -----------------------------------------------------------------
 #

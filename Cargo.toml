@@ -99,6 +99,10 @@ name = "pack_model"
 path = "src/bin/build/pack_model.rs"
 
 [[bin]]
+name = "prepare_pairs"
+path = "src/bin/build/prepare_pairs.rs"
+
+[[bin]]
 name = "build_wordfreq_text"
 path = "src/bin/build/build_wordfreq_text.rs"
 

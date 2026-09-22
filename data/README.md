@@ -4,6 +4,42 @@ This directory is **fully gitignored** (only this README is tracked). No data
 is committed to the repository — the repo ships code; releases ship the built
 artifacts.
 
+## Word pairs for every Devanagari language (reproducible, 2026-09-22)
+
+The phonetic engine learns from, and is measured on, the Aksharantar word
+pairs of **every language Aksharantar publishes in Devanagari**: Hindi (hin),
+Marathi (mar), Nepali (nep), Sanskrit (san), Konkani (kok), Maithili (mai),
+Bodo (brx) and Dogri (doi).  Kashmiri and Sindhi are Perso-Arabic there.
+
+```sh
+make data-fetch     # download + SHA-256-verify the 8 zips (~229 MB) -> data/raw/aksharantar/
+make data-prepare   # extract + clean + split -> data/pairs/{train,valid,test}.jsonl
+make eval-langs     # per-language IME metrics (SPLIT=valid to tune, test to report)
+```
+
+* `scripts/data-manifest.tsv` pins every file to an upstream revision and its
+  SHA-256; `scripts/fetch-data.sh` resumes interrupted downloads, refuses a
+  file whose hash does not match, and stamps verified files (`*.sha256`).
+* `prepare_pairs` (`src/bin/build/prepare_pairs.rs`) normalises every split
+  the same way — roman ASCII-lowercased, native NFC (Aksharantar stores
+  Marathi/Konkani eyelash-ra as र + nukta in ~15k rows) — then cleans and
+  de-duplicates train (a-z roman, U+0900..U+0963 native, exact duplicates
+  dropped; Hindi/Marathi/Konkani share hundreds of thousands of pairs) and
+  drops any train pair whose word appears in ANY language's valid or test
+  split.  Valid and test rows are never dropped, so their counts match the
+  published splits.  Train is shuffled with a fixed seed: the upstream files
+  are one language after another.
+* Result (seed 7): 7,308,261 train / 30,565 valid / 48,277 test pairs.  Test
+  per language: hin 10,112, mar 12,190, nep 4,101, san 5,302, kok 5,042,
+  mai 5,449, brx 4,081, doi 2,000.  Except Dogri (34% of its test words also
+  occur in other languages' training data upstream; removed from train
+  here), every test word is unseen in training.
+* Licence: manually collected pairs CC-BY 4.0; mined and existing-source
+  pairs CC0 (AI4Bharat).  Only the trained model ships — never the pairs.
+
+The legacy files under `aksharantar/` below are hin + nep only (merged,
+Hindi rows first); `data/pairs/` supersedes them for training and evaluation.
+
 > **Frozen inputs.** The `data/pipeline/` scripts and `data/backup/` snapshots
 > were removed on 2026-09-08. The files below can no longer be regenerated
 > locally — they are inputs, not outputs. To rebuild them from scratch you
