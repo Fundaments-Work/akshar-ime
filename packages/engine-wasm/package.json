@@ -8,7 +8,6 @@
   "files": [
     "pkg/",
     "../engine-js/akshar-ime.js",
-    "../../apps/playground/public/index.html",
     "../../docs/MANUAL.md",
     "../../README.md"
   ],
@@ -20,8 +19,7 @@
   },
   "scripts": {
     "build": "./build.sh",
-    "build:wasm": "cargo build --target wasm32-unknown-unknown --features wasm --release && wasm-bindgen --target web --out-dir pkg --out-name akshar_ime ../../target/wasm32-unknown-unknown/release/akshar_ime.wasm",
-    "demo": "make -C ../../ wasm-serve"
+    "build:wasm": "cargo build --target wasm32-unknown-unknown --features wasm --release && wasm-bindgen --target web --out-dir pkg --out-name akshar_ime ../../target/wasm32-unknown-unknown/release/akshar_ime.wasm"
   },
   "sideEffects": false
 }

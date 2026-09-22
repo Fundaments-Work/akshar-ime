@@ -1,6 +1,7 @@
 # Playground + Browser Extension Plan (2026-09-22)
 
-Status: PLAN ONLY — no code. Training (`train-mid-att`) is running;
+Status: playground DONE (shipped to `Fundaments-Work/akshar-playground`,
+private); extension still to build. Training (`train-mid-att`) is running;
 nothing here touches the engine, the model, or any hot path.
 
 ## Non-negotiable principle
@@ -33,7 +34,16 @@ Move, don't rewrite: git-mv preserves history. `Makefile` targets
 (`wasm`, `wasm-serve`) gain path updates only. `web/` becomes a redirect
 stub for one release, then deleted.
 
-## A. Playground on Cloudflare (experiment + write)
+## A. Playground on Cloudflare — DONE 2026-09-22
+
+Shipped as the private repo `Fundaments-Work/akshar-playground`
+(self-contained: engine + wrapper + model bundled, no CDN, clean editor,
+no integration guide). Deploy: `wrangler deploy` (Workers) or
+`wrangler pages deploy public`. Engine refresh = copy the 3 paths in that
+repo's README. What was planned here as R2/config.js/vendor-mirror was
+superseded during build: everything static, no external URLs.
+
+## B. Chrome extension (MV3) — TODO
 
 Purpose: a URL where anyone can type Devanagari in the browser —
 experiment with transliteration and actually write text. Marketing,

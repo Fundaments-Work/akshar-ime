@@ -26,7 +26,7 @@ DATA_DIR          := $(PREFIX)/share/akshar-ime
 # not been re-measured since the 2026-09-06 engine changes.
 TRIGRAM_THRESHOLD ?= 3e-2
 .PHONY: all release debug test install uninstall reinstall clean reset-learning \
-        restart-ibus help wasm wasm-clean wasm-serve release-upload pack web-model \
+        restart-ibus help wasm wasm-clean release-upload pack web-model \
         train train-quick train-mid train-full eval eval-full eval-ime eval-errors \
         ablate manual docs check check-native check-wasm release-check
 # --- Main Targets ---
@@ -270,26 +270,7 @@ wasm:  ## Build WASM package (packages/engine-wasm/pkg).
 
 wasm-clean:  ## Remove WASM build artifacts.
 	@echo "Cleaning WASM artifacts..."
-	@rm -rf packages/engine-wasm/pkg apps/playground/public/vendor apps/playground/public/models apps/playground/public/config.js
-
-playground-build: wasm  ## Assemble the deployable playground (apps/playground/public/).
-	@echo "Assembling playground..."
-	@bash apps/playground/build.sh
-
-playground-deploy: playground-build  ## Deploy the playground to Cloudflare Workers.
-	@echo "Deploying to Cloudflare (see apps/playground/README.md for R2 setup)..."
-	@npx --yes wrangler deploy --config apps/playground/wrangler.toml
-
-wasm-serve: playground-build  ## Build playground and serve at http://localhost:PORT/ (default 8000)
-	@PORT=$${PORT:-8000}; \
-	ORIG=$$PORT; \
-	for p in $$PORT 8001 8002 8003 8004 8005 8006 8007 8008 8009 8010; do \
-	  if ! ss -tln 2>/dev/null | grep -q ":$$p " && ! ss -tln6 2>/dev/null | grep -q ":$$p "; then PORT=$$p; break; fi; \
-	done; \
-	if [ "$$PORT" != "$$ORIG" ]; then echo "Port $$ORIG in use, using $$PORT instead"; fi; \
-	echo "Serving playground at http://localhost:$$PORT/ (Ctrl+C to stop)"; \
-	echo "  (override with: make wasm-serve PORT=9000)"; \
-	python3 -m http.server $$PORT --directory apps/playground/public
+	@rm -rf packages/engine-wasm/pkg
 
 release-upload:  ## Upload locally built model artifacts to a GitHub release (TAG=vX.Y.Z required).
 	@if [ -z "$(TAG)" ]; then echo "usage: make release-upload TAG=vX.Y.Z"; exit 1; fi

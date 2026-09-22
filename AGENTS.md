@@ -1,6 +1,6 @@
 # AGENTS.md — Akshar Devanagari IME
 
-Rust crate `akshar_ime` (lib entry `src/lib.rs`, public API `ImeEngine::get_suggestions` / `user_confirms`) + C IBus engine (`src/ibus_engine.c`) + wasm/browser demo (`packages/engine-wasm`, `packages/engine-js`, `apps/playground`). Module map: `src/core/` (decoder, engine, reranker, LM, unified container), `src/fuzzy/`, `src/learning.rs`, `src/persistence.rs`, `src/c_api.rs` (native only), `src/wasm.rs` (`wasm` feature only).
+Rust crate `akshar_ime` (lib entry `src/lib.rs`, public API `ImeEngine::get_suggestions` / `user_confirms`) + C IBus engine (`src/ibus_engine.c`) + browser engine (`packages/engine-wasm`, `packages/engine-js`; the deployable playground lives in the separate private repo `Fundaments-Work/akshar-playground`, nested here only under gitignored `deploy/`). Module map: `src/core/` (decoder, engine, reranker, LM, unified container), `src/fuzzy/`, `src/learning.rs`, `src/persistence.rs`, `src/c_api.rs` (native only), `src/wasm.rs` (`wasm` feature only).
 
 ## Commands (use the Makefile, not raw cargo)
 
@@ -8,7 +8,7 @@ Rust crate `akshar_ime` (lib entry `src/lib.rs`, public API `ImeEngine::get_sugg
 - `make check` — **required gate**: `cargo fmt --check` + `cargo clippy --release --all-targets -- -D warnings` + tests + wasm target check. Native-green does not imply wasm-green (a broken wasm build shipped in v1.1.0), so `make check-wasm` is not optional. Needs `rustup target add wasm32-unknown-unknown`.
 - `make eval | eval-full | eval-ime | eval-errors | ablate` — accuracy by split, bootstrap CIs + latency, JSON report to `docs/generated/eval.json`, error taxonomy, component ablations. Profile: `cargo run --release --example profile_decode`.
 - `make train-quick | train-mid | train-full` — differ **only** in `--reranker-pairs` (100k / 500k / all 3.59M). EM emissions + KN LM always ingest all pairs; chunked mode engages only above 200k, so validate trainer changes with `train-mid`, never `train-quick`. Full run takes ~4h.
-- `make web-model` — builds browser container `data/akshar_wasm.model` via trigram pruning (`TRIGRAM_THRESHOLD`, default `3e-2`). `make wasm` / `make wasm-serve` for the browser demo.
+- `make web-model` — builds browser container `data/akshar_wasm.model` via trigram pruning (`TRIGRAM_THRESHOLD`, default `3e-2`). `make wasm` builds the browser engine; the playground ships from the separate `Fundaments-Work/akshar-playground` repo (see `docs/plans/playground-extension.md`).
 - IBus deploy: `sudo make install` then `make restart-ibus` **without sudo**. CI needs `libibus-1.0-dev libjansson-dev` and runs `make release`.
 
 ## Data and models — gitignored, absent on fresh clones

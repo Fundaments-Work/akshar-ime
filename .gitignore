@@ -12,10 +12,10 @@ dist
 *.bak
 .zcode/
 
-# Generated playground assembly (built by apps/playground/build.sh).
-apps/playground/public/vendor/
-apps/playground/public/models/
-apps/playground/public/config.js
+# Nested deploy checkout (separate private repo
+# Fundaments-Work/akshar-playground, cloned for sync convenience).
+# Never commit engine work through it.
+/deploy/
 
 # All data lives under data/ (corpora, raw text, pipeline code+store, built
 # model artifacts) and is never tracked.  Only data/README.md is tracked.

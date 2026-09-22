@@ -65,15 +65,18 @@ of `user_confirms` (sets prev, clears the prev-dependent suggestion cache).
   −8, pooled +5 (noise) — killed per criterion. Log:
   `plans/archive/2026-09-22-attestation-training.md`.
 
-### Playground (Cloudflare-ready) + web reorg
+### Playground: separate self-contained repo (no CDN)
 
-- `web/` + `js/` + `wasm/` reorganized to `apps/playground/` +
-  `packages/engine-js` + `packages/engine-wasm` (git-mv, history kept).
-- Playground: full-page writing surface (word count, copy/download/clear),
-  `config.js` model URL baked at build time, `wrangler.toml` (Workers
-  Static Assets) + R2 model flow, `make playground-build` /
-  `playground-deploy` / updated `wasm-serve`. Verified serving locally
-  (all assets 200). See `apps/playground/README.md`.
+- `apps/playground/` moved OUT to the private repo
+  `Fundaments-Work/akshar-playground` (nested here only under gitignored
+  `deploy/`): clean editor shell (word/document, copy/download/clear,
+  learned-reset; no integration guide, no emojis), engine + wrapper + model
+  bundled under `public/` — no CDN, no external requests, no build step.
+  Deploys to Cloudflare Workers (`wrangler deploy`) or Pages; verified
+  serving locally (all assets 200).
+- Main repo keeps the engine (`packages/`) only: `wasm-serve` /
+  `playground-build` / `playground-deploy` targets pruned from the
+  Makefile; MANUAL deployment chapter + AGENTS.md map updated.
 
 ### Correctness fixes + pipeline repair (2026-09-10)
 

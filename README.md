@@ -98,7 +98,7 @@ let suggestions = engine.get_suggestions("namaste", 5);
 engine.user_confirms("namaste", "नमस्ते");   // adaptive learning
 ```
 
-Browser: `make wasm-serve`, then see the manual's deployment chapter.
+Browser: build the engine for the web (`make wasm`), served by the standalone playground repo.
 
 ## Reproducing the numbers
 

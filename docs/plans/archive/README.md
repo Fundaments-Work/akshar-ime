@@ -23,6 +23,8 @@ Read in this order:
 | `2026-09-22-mbr-selection.md` | Sep 22 | MBR consensus: 24 configs on valid native, best +2/798 (noise); converged lists carry no votable information; probe removed. |
 | `2026-09-22-ne-routing.md` | Sep 22 | NE burial analysis: router/demotion/attenuation killed (deep 6%, demote +140/−138, freq-burial 14%); 46% absent = generation gap, needs training; probe removed. |
 | `2026-09-22-attestation-training.md` | Sep 22 | Attestation-weighted train-mid: entities +13, native −8, pooled +5 (noise) — killed as ship candidate; flag kept, artifact local-only. |
+| `2026-09-08-experiment-report.md` | Sep 8 | Component ablation report (which ideas carry accuracy); superseded by MANUAL §9 but kept for the raw tables. |
+| `correctness-audit-2026-09-10.md` | Sep 10 | Correctness-first audit: 14 fixes + train-mid validation; completed, all landed. |
 
 There are currently no live planning documents — `docs/plans/` holds only this
 archive. The live roadmap is `docs/MANUAL.md` §12–13, and the mathematics and

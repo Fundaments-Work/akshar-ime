@@ -177,16 +177,18 @@ engine.user_confirms("namaste", "नमस्ते");
 ## Use from the browser
 
 ```sh
-make wasm-serve     # builds the playground, serves at http://localhost:8000/
+make wasm           # builds packages/engine-wasm/pkg/
 ```
 
 ```js
-import { AksharIME } from './vendor/js/akshar-ime.js';
+import { AksharIME } from 'packages/engine-js/akshar-ime.js';
 await AksharIME.init({ modelUrl: './models/akshar_wasm.model' });
 AksharIME.attach(document.querySelector('input'));
 ```
 
-See Chapter 10 for deployment detail (`apps/playground/`, Cloudflare-ready).
+The runnable playground (editor + deploy) ships from a separate repository
+(self-contained: engine, wrapper, model bundled, no CDN) — see
+`docs/plans/playground-extension.md`. This repo builds the engine it embeds.
 
 \newpage
 
@@ -1445,12 +1447,12 @@ Learned state persists to the user's data directory (`src/persistence.rs`);
 ## Browser / WebAssembly
 
 ```sh
-make wasm-serve         # builds + serves the playground on :8000
-make playground-deploy  # deploys apps/playground/ to Cloudflare Workers
+make wasm             # builds packages/engine-wasm/pkg/
+make web-model        # builds data/akshar_wasm.model (browser profile)
 ```
 
 ```js
-import { AksharIME } from './vendor/js/akshar-ime.js';
+import { AksharIME } from 'packages/engine-js/akshar-ime.js';
 await AksharIME.init({ modelUrl: './models/akshar_wasm.model' });
 AksharIME.attach(document.querySelector('input'));
 ```
@@ -1459,10 +1461,15 @@ rerankerUrl)` from `packages/engine-wasm/pkg/akshar_ime.js` (raw factory
 `createEngineFromModelUrl` — see `src/wasm.rs`); its engine object exposes
 `getSuggestions`, `confirm`, `export_state`/`import_state`.
 
+The runnable playground (editor UI) ships from the separate private repo
+`Fundaments-Work/akshar-playground` — self-contained (engine, wrapper and
+model bundled under `public/`, no CDN, no external requests), deployable to
+Cloudflare Workers or Pages. Sync flow: copy `packages/engine-js/`,
+`packages/engine-wasm/pkg/` and `data/akshar_wasm.model` into its `public/`
+tree (paths in that repo's README), commit, redeploy.
+
 Serve `akshar_wasm.model` with `Content-Encoding: br` and a long cache lifetime;
-it is 4.94 MB compressed and immutable. On Cloudflare it lives in R2 with its
-public URL baked into `apps/playground/public/config.js` at build time
-(`MODEL_URL=… make playground-build`); see `apps/playground/README.md`.
+it is 4.94 MB compressed and immutable.
 
 `WasmEngine::from_bytes(model, lexicon, weights)` retains its `lexicon`
 parameter as an ignored no-op so existing callers keep working. Pass `null`.
