@@ -8,7 +8,7 @@ use akshar_ime::core::decoder::{DecoderConfig, ModelDecoder};
 use akshar_ime::core::em_trainer::{Trainer, TrainerConfig};
 use akshar_ime::core::holdout::{is_holdout, DEFAULT_HOLDOUT_DENOM};
 use akshar_ime::core::reranker::{
-    extract_dense_features, extract_sparse_features, rank_candidates, FreqRanks, DENSE_DIM,
+    extract_dense_features, extract_sparse_features_lang, rank_candidates, FreqRanks, DENSE_DIM,
     HASH_SIZE,
 };
 use akshar_ime::core::reranker_weights::{MEAN_DENSE, STD_DENSE, W_DENSE};
@@ -73,6 +73,9 @@ use akshar_ime::core::unified::UnifiedModel;
 use akshar_ime::core::wordtrie::WordTrie;
 use akshar_ime::ImeEngine;
 use anyhow::{Context, Result};
+use rand::seq::SliceRandom;
+use rand::SeedableRng;
+use rand_chacha::ChaCha8Rng;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs::File;
@@ -88,6 +91,9 @@ struct Record {
     native: String,
     #[serde(default = "default_weight")]
     weight: u32,
+    /// Language of the pair (ISO 639-3, from `prepare_pairs`); empty if unknown.
+    #[serde(default)]
+    lang: String,
 }
 
 fn default_weight() -> u32 {
@@ -113,6 +119,7 @@ fn clean_devanagari_token(word: &str) -> Option<String> {
 
 fn auto_detect_pairs() -> Option<PathBuf> {
     let candidates = [
+        "data/pairs/train.jsonl",
         "data/aksharantar/train_devanagari.jsonl",
         "data/aksharantar/nep_train.json",
         "data/corpus_clean.json",
@@ -169,7 +176,9 @@ fn attestation_weight(freq: &HashMap<String, u32>, nat: &str) -> u32 {
 }
 
 const RERANK_DECODE_DEPTH: usize = 50;
-const RERANK_DECODE_BEAM: usize = 64;
+/// Same beam as the engine (engine.rs DECODER_BEAM), so the reranker trains
+/// on the candidate lists users will actually be shown.
+const RERANK_DECODE_BEAM: usize = 32;
 
 fn main() -> Result<()> {
     let mut pairs_path: Option<PathBuf> = None;
@@ -183,6 +192,10 @@ fn main() -> Result<()> {
     let mut wasm_mode = false;
     let mut smoke = false;
     let mut attestation = false;
+    let mut seed: u64 = 7;
+    let mut rerank_holdout = true;
+    let mut min_akshara_count: u32 = 2;
+    let mut em_cache: Option<PathBuf> = None;
     // Attestation weighting (Roark/Dakshina §4.2 pattern): weight each EM/LM
     // pair by log-dampened corpus frequency of its Devanagari side, so
     // dominant romanization conventions dominate training. Off = all weights
@@ -240,6 +253,24 @@ fn main() -> Result<()> {
             "--wasm" => wasm_mode = true,
             "--smoke" => smoke = true,
             "--attestation" => attestation = true,
+            "--seed" => {
+                seed = args
+                    .next()
+                    .context("value for --seed")?
+                    .parse()
+                    .context("parse --seed")?
+            }
+            "--no-rerank-holdout" => rerank_holdout = false,
+            "--em-cache" => {
+                em_cache = Some(PathBuf::from(args.next().context("value for --em-cache")?))
+            }
+            "--min-akshara-count" => {
+                min_akshara_count = args
+                    .next()
+                    .context("value for --min-akshara-count")?
+                    .parse()
+                    .context("parse --min-akshara-count")?
+            }
             "-h" | "--help" => {
                 println!("Akshar Unified Model Trainer");
                 println!("Usage: cargo run --release --bin train -- [options]");
@@ -254,6 +285,10 @@ fn main() -> Result<()> {
                 println!("  --wasm                  Export lightweight WASM web profile");
                 println!("  --smoke                 Run fast smoke training validation");
                 println!("  --attestation           Weight EM/LM pairs by log corpus frequency");
+                println!("  --seed <n>              Shuffle seed for the pair order (default: 7)");
+                println!("  --no-rerank-holdout     Let EM/LM see the reranker's own pairs (old behaviour)");
+                println!("  --min-akshara-count <n> Keep aksharas seen >= n times in training (default: 2)");
+                println!("  --em-cache <path>       Reuse/save the EM+LM model for this exact data split");
                 return Ok(());
             }
             other => {
@@ -343,13 +378,10 @@ fn main() -> Result<()> {
         ..Default::default()
     };
 
-    let mut em_trainer = Trainer::new().with_limit(limit);
+    // Read every pair before training anything: the reranker's pairs and its
+    // held-out dev set are chosen first, so they can be kept out of EM/LM.
     let f = File::open(&pairs_file).context("open pairs file")?;
-    let mut raw_pairs: Vec<(String, String)> = Vec::new();
-    let mut count = 0usize;
-    // Attestation observability (else we're flying blind).
-    let (mut wmax, mut wsum) = (0u32, 0u64);
-
+    let mut rows: Vec<((String, String), u32, String)> = Vec::new();
     for line in BufReader::new(f).lines().map_while(Result::ok) {
         let t = line.trim();
         if t.is_empty() {
@@ -359,35 +391,150 @@ fn main() -> Result<()> {
             let eng = rec.english.trim().to_ascii_lowercase();
             let nat = rec.native.trim().to_string();
             if !eng.is_empty() && !nat.is_empty() {
-                // Attestation: log-dampened corpus frequency of the Devanagari
-                // side; off (None) reproduces the file weight (default 1.0).
-                let w = match attest_freq.as_ref() {
-                    Some(freq) => attestation_weight(freq, &nat),
-                    None => rec.weight,
-                };
-                wmax = wmax.max(w);
-                wsum += w as u64;
-                em_trainer.add_pair_weighted(&eng, &nat, f64::from(w));
-                raw_pairs.push((eng, nat));
-                count += 1;
-                if let Some(lim) = limit {
-                    if count >= lim {
-                        break;
-                    }
+                rows.push(((eng, nat), rec.weight, rec.lang));
+                if limit.is_some_and(|lim| rows.len() >= lim) {
+                    break;
                 }
             }
         }
     }
-    println!("Ingested {} valid parallel pairs.", count);
-    if attestation {
+    // Uniform order.  Pair files arrive one language after another (the
+    // upstream releases are per language), and every slice below -- the
+    // reranker's "first N", the dev "tail" -- must sample all of them.  The
+    // reranker was once trained on the first 500k rows of a Hindi-then-Nepali
+    // file: Hindi only, while its vocabulary, dev set and test were Nepali.
+    rows.shuffle(&mut ChaCha8Rng::seed_from_u64(seed));
+    // The ranking is conditioned on these languages (sorted, so the index of a
+    // language is stable for a given data set); none if the file has no tags.
+    let langs: Vec<String> = {
+        let mut l: Vec<String> = rows
+            .iter()
+            .map(|r| r.2.clone())
+            .filter(|l| !l.is_empty())
+            .collect();
+        l.sort();
+        l.dedup();
+        l
+    };
+    let mut raw_pairs: Vec<(String, String)> = Vec::with_capacity(rows.len());
+    let mut pair_weights: Vec<u32> = Vec::with_capacity(rows.len());
+    let mut pair_lang: Vec<Option<u8>> = Vec::with_capacity(rows.len());
+    for (pair, weight, lang) in rows {
+        raw_pairs.push(pair);
+        pair_weights.push(weight);
+        pair_lang.push(langs.iter().position(|l| *l == lang).map(|i| i as u8));
+    }
+    let count = raw_pairs.len();
+    if !langs.is_empty() {
         println!(
-            "Attestation weights: max={} mean={:.2} (1.0 = unseen, log-dampened).",
-            wmax,
-            wsum as f64 / count.max(1) as f64
+            "Languages (ranking is conditioned on each): {}",
+            langs.join(", ")
         );
     }
+    println!("Read {count} valid parallel pairs (shuffled, seed {seed}).");
 
-    let mut translit_model = em_trainer.finalize(&em_config);
+    // Reranker pairs are the head of the shuffled list, dev the tail.
+    const DEV_SIZE: usize = 4_000;
+    let dev_reserved = if !smoke && count > DEV_SIZE {
+        DEV_SIZE
+    } else {
+        0
+    };
+    let num_rerank = if smoke {
+        500.min(count)
+    } else if reranker_pairs == 0 {
+        count - dev_reserved
+    } else {
+        reranker_pairs.min(count - dev_reserved)
+    };
+    // Hold both out of EM/LM, so the reranker learns from candidate lists
+    // scored by a model that never saw those words -- the situation at test
+    // time.  Trained on memorised pairs, emit/lm look far more decisive than
+    // they are on unseen words, and the learned weights over-trust them.
+    // Skipped when the held-out share would exceed a quarter of the data
+    // (train-full) or with --no-rerank-holdout.
+    let holdout = rerank_holdout && (num_rerank + dev_reserved) * 4 <= count;
+    let em_range = if holdout {
+        num_rerank..count - dev_reserved
+    } else {
+        0..count
+    };
+    println!(
+        "EM/LM train on {} pairs; reranker {} + dev {} pairs {}.",
+        em_range.len(),
+        num_rerank,
+        dev_reserved,
+        if holdout {
+            "held out of EM/LM"
+        } else {
+            "NOT held out (in-sample)"
+        }
+    );
+
+    // Akshara occurrence counts over the EM training words: the packing step
+    // keeps an akshara if the model was trained on it often enough.
+    let mut akshara_count: HashMap<String, u32> = HashMap::new();
+    for (_, nat) in &raw_pairs[em_range.clone()] {
+        for a in akshar_ime::core::akshara::segment(nat) {
+            *akshara_count.entry(a).or_insert(0) += 1;
+        }
+    }
+
+    // --em-cache: EM is the slow phase and is deterministic given the exact
+    // training slice and settings, which the key records.  A reranker or
+    // packing experiment can then skip it without risking a stale model.
+    let em_key = format!(
+        "pairs={} n={count} seed={seed} em={}..{} iterations={iterations} attestation={attestation}",
+        pairs_file.display(),
+        em_range.start,
+        em_range.end
+    );
+    let cached = em_cache.as_deref().and_then(|p| {
+        let bytes = std::fs::read(p).ok()?;
+        let (key, model): (String, akshar_ime::core::translit_model::TranslitModel) =
+            bincode::deserialize(&bytes).ok()?;
+        (key == em_key).then_some(model)
+    });
+    let mut translit_model = if let Some(model) = cached {
+        println!("Loaded the EM/LM model from the cache (key matches).");
+        model
+    } else {
+        let mut em_trainer = Trainer::new();
+        // Attestation observability (else we're flying blind).
+        let (mut wmax, mut wsum) = (0u32, 0u64);
+        for i in em_range.clone() {
+            let (eng, nat) = &raw_pairs[i];
+            // Attestation: log-dampened corpus frequency of the Devanagari
+            // side; off (None) reproduces the file weight (default 1.0).
+            let w = match attest_freq.as_ref() {
+                Some(freq) => attestation_weight(freq, nat),
+                None => pair_weights[i],
+            };
+            wmax = wmax.max(w);
+            wsum += w as u64;
+            em_trainer.add_pair_weighted(eng, nat, f64::from(w));
+        }
+        println!("Ingested {} pairs into EM/LM.", em_range.len());
+        if attestation {
+            println!(
+                "Attestation weights: max={} mean={:.2} (1.0 = unseen, log-dampened).",
+                wmax,
+                wsum as f64 / em_range.len().max(1) as f64
+            );
+        }
+        let model = em_trainer.finalize(&em_config);
+        // The trainer holds every pair plus its count tables; free it before
+        // the reranker phase, which needs the memory for its candidate batches.
+        drop(em_trainer);
+        if let Some(p) = em_cache.as_deref() {
+            let bytes = bincode::serialize(&(&em_key, &model))
+                .map_err(|e| anyhow::anyhow!("serialise EM cache: {e}"))?;
+            std::fs::write(p, bytes).with_context(|| format!("write {}", p.display()))?;
+            println!("Cached the EM/LM model at {}.", p.display());
+        }
+        model
+    };
+    drop(pair_weights);
     translit_model.build_trigram_index();
     println!(
         "EM training finished in {:.2?} (aksharas: {}, chunks: {}).",
@@ -447,475 +594,317 @@ fn main() -> Result<()> {
 
     let word_trie = WordTrie::from_freq_map(&vocab_freq, &|a| translit_model.akshara_id(a), 1);
 
-    // Held-out dev size; defined up front so the full run can reserve it.
-    const DEV_SIZE: usize = 4_000;
-    let num_train_pairs = if smoke {
-        500
-    } else if reranker_pairs == 0 {
-        // Exp 5: full run previously consumed every pair AND left dev empty,
-        // losing its overfit guard. Reserve the tail as dev (mirrors partial
-        // runs, which use raw_pairs[len-DEV..]).
-        if raw_pairs.len() > DEV_SIZE {
-            raw_pairs.len() - DEV_SIZE
-        } else {
-            raw_pairs.len()
-        }
-    } else {
-        raw_pairs.len().min(reranker_pairs)
-    };
-    // (actual count printed after dev reservation below)
+    // The reranker's pairs (head) and dev set (tail) were chosen in Phase 1.
+    let num_train_pairs = num_rerank;
 
+    /// One training list: the decoder's candidates for a pair, with the gold's
+    /// position and the pair's language (`None` = trained language-blind).
     struct RerankItem {
         target_idx: usize,
-        /// Standardised dense feature matrix: dense_feats[i] is the DENSE_DIM feature
-        /// vector for candidate i (already z-scored against MEAN_DENSE/STD_DENSE).
+        lang: Option<u8>,
+        /// dense_feats[i]: candidate i's DENSE_DIM features (raw until
+        /// standardised with the frozen dev normalisation).
         dense_feats: Vec<[f64; DENSE_DIM]>,
         sparse: Vec<Vec<usize>>,
     }
 
-    // For large training sets, process in batches to keep memory bounded.
-    // Each batch is decoded once and reused for all epochs.
-    const BATCH_SIZE: usize = 100_000;
-    let use_chunked = num_train_pairs > 200_000;
-    // Jointly train: 29 dense weights + 2^20 sparse weights.
-    // Warm-start dense weights from W_DENSE (the established linear model)
-    // and jointly optimize them with the sparse table under the softmax objective.
-    let mut dense_weights: Vec<f64> = W_DENSE.to_vec();
-    let mut dense_grad_sq: Vec<f64> = vec![1.0f64; DENSE_DIM];
-    let mut sparse_table: Vec<f32> = vec![0.0f32; HASH_SIZE];
-    let mut grad_sq: Vec<f32> = vec![0.0f32; HASH_SIZE];
-    const LR0: f64 = 0.05;
-    const DENSE_LR_SCALE: f64 = 0.1;
-    // Fraction of the initial learning rate remaining at the end of the run.
-    // AdaGrad already adapts per-slot, so this only needs to be a gentle global
-    // anneal -- the previous schedule decayed by ~1e-9 across a full run, which
-    // silently discarded most of the corpus.
-    const LR_FINAL_FRACTION: f64 = 0.1;
-    let mut lr: f64 = LR0;
-    let mut dense_stats = DenseStats::new();
-
-    // Held-out dev set, taken from the tail of the corpus so it never overlaps
-    // the training slice.  Without this a long run reports only training loss,
-    // which cannot distinguish "learning" from "memorising 1M sparse slots":
-    // the table has ~1e6 parameters and no regularisation, so overfitting is
-    // the default failure and it was previously invisible.
-    // Exp 5: the tail is ALWAYS reserved (except smoke / tiny corpora), so the
-    // training slice below can never include dev pairs — previously the full
-    // run trained on all pairs and evaluated on none.
-    let mut num_train_pairs = num_train_pairs;
-    let dev_pairs: Vec<(String, String)> = if !smoke && raw_pairs.len() > DEV_SIZE {
-        let tail = raw_pairs[raw_pairs.len() - DEV_SIZE..].to_vec();
-        num_train_pairs = num_train_pairs.min(raw_pairs.len() - DEV_SIZE);
-        tail
-    } else {
-        Vec::new()
-    };
-    println!(
-        "Pre-decoding candidates for {} training pairs (dev reserved: {})...",
-        num_train_pairs,
-        dev_pairs.len()
-    );
-
-    let dev_items: Vec<RerankItem> = if dev_pairs.is_empty() {
-        Vec::new()
-    } else {
-        let t0 = Instant::now();
-        let mut items = Vec::with_capacity(dev_pairs.len());
-        for (roman, gold) in &dev_pairs {
-            let cands = decoder.decode_union(roman, RERANK_DECODE_DEPTH, Some(&word_trie));
-            let (order, heur, heur_rank) = rank_candidates(&cands, &vocab_freq);
-            if let Some(target_idx) = order.iter().position(|c| c.dev == *gold) {
-                let sparse: Vec<Vec<usize>> = order
-                    .iter()
-                    .map(|c| {
-                        let aks = akshar_ime::core::akshara::segment(&c.dev);
-                        extract_sparse_features(&c.dev, roman, c.akshara_count, &aks)
-                    })
-                    .collect();
-                let dense_feats: Vec<[f64; DENSE_DIM]> = order
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, c)| {
-                        let raw = extract_dense_features(
-                            c,
-                            idx,
-                            heur[idx],
-                            heur_rank[idx],
-                            roman,
-                            &vocab_freq,
-                            &ranks,
-                        );
-                        let mut z = [0.0f64; DENSE_DIM];
-                        for k in 0..DENSE_DIM {
-                            let sd = STD_DENSE[k];
-                            z[k] = if sd.abs() > 1e-12 {
-                                (raw[k] - MEAN_DENSE[k]) / sd
-                            } else {
-                                0.0
-                            };
-                        }
-                        z
-                    })
-                    .collect();
-                items.push(RerankItem {
-                    target_idx,
-                    dense_feats,
-                    sparse,
-                });
-            }
-        }
-        println!(
-            "Held-out dev set: {} of {} pairs have the gold in the candidate list (decoded in {:.2?}).",
-            items.len(),
-            dev_pairs.len(),
-            t0.elapsed()
-        );
-        items
+    // Decode one pair into a training list; None when the gold is not among
+    // the candidates (nothing to learn from).
+    let decode_item = |roman: &str, gold: &str, lang: Option<u8>| -> Option<RerankItem> {
+        let cands = decoder.decode_union(roman, RERANK_DECODE_DEPTH, Some(&word_trie));
+        let (order, heur, heur_rank) = rank_candidates(&cands, &vocab_freq);
+        let target_idx = order.iter().position(|c| c.dev == gold)?;
+        let sparse = order
+            .iter()
+            .map(|c| {
+                let aks = akshar_ime::core::akshara::segment(&c.dev);
+                extract_sparse_features_lang(
+                    &c.dev,
+                    roman,
+                    c.akshara_count,
+                    &aks,
+                    lang.map(usize::from),
+                )
+            })
+            .collect();
+        let dense_feats = order
+            .iter()
+            .enumerate()
+            .map(|(idx, c)| {
+                extract_dense_features(
+                    c,
+                    idx,
+                    heur[idx],
+                    heur_rank[idx],
+                    roman,
+                    &vocab_freq,
+                    &ranks,
+                )
+            })
+            .collect();
+        Some(RerankItem {
+            target_idx,
+            lang,
+            dense_feats,
+            sparse,
+        })
     };
 
-    /// Loss and top-1 on the held-out set under the current sparse table.
-    fn dev_eval(items: &[RerankItem], table: &[f32], dw: &[f64]) -> Option<(f64, f64)> {
-        if items.is_empty() {
-            return None;
-        }
-        let (mut loss, mut hits) = (0.0f64, 0usize);
-        for s in items {
-            let mut scores: Vec<f64> = s
-                .dense_feats
-                .iter()
-                .map(|z| dw.iter().zip(z.iter()).map(|(w, x)| w * x).sum::<f64>())
+    // Decode many pairs in parallel, keeping input order: every pair decodes
+    // independently against read-only tables, so the batch splits across all
+    // cores.  `jobs[i]` = (pair index, language to tag it with).
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let decode_all = |jobs: &[(usize, Option<u8>)]| -> Vec<RerankItem> {
+        let chunk = jobs.len().div_ceil(threads).max(1);
+        std::thread::scope(|s| {
+            let handles: Vec<_> = jobs
+                .chunks(chunk)
+                .map(|part| {
+                    let decode_item = &decode_item;
+                    let raw_pairs = &raw_pairs;
+                    s.spawn(move || {
+                        part.iter()
+                            .filter_map(|&(i, lang)| {
+                                decode_item(&raw_pairs[i].0, &raw_pairs[i].1, lang)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
                 .collect();
-            for (idx, sf) in s.sparse.iter().enumerate() {
-                for &h in sf {
-                    scores[idx] += f64::from(table[h]);
-                }
-            }
-            let max_s = scores.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-            let exp_s: Vec<f64> = scores.iter().map(|&sc| (sc - max_s).exp()).collect();
-            let sum_exp: f64 = exp_s.iter().sum();
-            let p_target = (exp_s[s.target_idx] / (sum_exp + 1e-12)).max(1e-12);
-            loss += -p_target.ln();
-            if scores
+            handles
+                .into_iter()
+                .flat_map(|h| h.join().expect("decode thread panicked"))
+                .collect()
+        })
+    };
+
+    // The learned linear model: shared dense weights (warm-started from
+    // W_DENSE), per-language dense offsets, and the sparse table -- which holds
+    // both the shared and the language-tagged feature slots.  AdaGrad per slot.
+    struct Weights {
+        dense: Vec<f64>,
+        dense_g2: Vec<f64>,
+        lang: Vec<Vec<f64>>,
+        lang_g2: Vec<Vec<f64>>,
+        sparse: Vec<f32>,
+        sparse_g2: Vec<f32>,
+    }
+    impl Weights {
+        fn scores(&self, s: &RerankItem) -> Vec<f64> {
+            let offsets = s.lang.and_then(|l| self.lang.get(usize::from(l)));
+            s.dense_feats
+                .iter()
+                .zip(&s.sparse)
+                .map(|(z, slots)| {
+                    let mut sc = 0.0;
+                    for k in 0..DENSE_DIM {
+                        sc += (self.dense[k] + offsets.map_or(0.0, |o| o[k])) * z[k];
+                    }
+                    sc + slots
+                        .iter()
+                        .map(|&h| f64::from(self.sparse[h]))
+                        .sum::<f64>()
+                })
+                .collect()
+        }
+        /// Softmax over the list; returns (candidate probabilities, top-1 hit).
+        fn posterior(&self, s: &RerankItem) -> (Vec<f64>, bool) {
+            let scores = self.scores(s);
+            let max = scores.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let exp: Vec<f64> = scores.iter().map(|&x| (x - max).exp()).collect();
+            let z: f64 = exp.iter().sum::<f64>() + 1e-12;
+            let hit = scores
                 .iter()
                 .enumerate()
                 .max_by(|a, b| a.1.total_cmp(b.1))
-                .is_some_and(|(i, _)| i == s.target_idx)
-            {
-                hits += 1;
+                .is_some_and(|(i, _)| i == s.target_idx);
+            (exp.iter().map(|e| e / z).collect(), hit)
+        }
+        /// One listwise cross-entropy step; returns the sample's loss.
+        fn step(&mut self, s: &RerankItem, lr: f64) -> f64 {
+            const DENSE_LR_SCALE: f64 = 0.1;
+            let (probs, _) = self.posterior(s);
+            let mut dense_grad = [0.0f64; DENSE_DIM];
+            for (idx, p) in probs.iter().enumerate() {
+                let g = if idx == s.target_idx { p - 1.0 } else { *p };
+                if g.abs() <= 1e-5 {
+                    continue;
+                }
+                for &h in &s.sparse[idx] {
+                    let gf = g as f32;
+                    self.sparse_g2[h] += gf * gf;
+                    self.sparse[h] -= (lr as f32) / (self.sparse_g2[h].sqrt() + 1e-4) * gf;
+                }
+                // dL/dw_k = sum_i (p_i - y_i) z_ik, applied once per sample.
+                for (k, acc) in dense_grad.iter_mut().enumerate() {
+                    *acc += g * s.dense_feats[idx][k];
+                }
+            }
+            let lang = s.lang.map(usize::from);
+            for (k, &g) in dense_grad.iter().enumerate() {
+                if g.abs() <= 1e-6 {
+                    continue;
+                }
+                // The shared copy and the language copy see the same feature,
+                // so they receive the same gradient (feature augmentation).
+                self.dense_g2[k] += g * g;
+                self.dense[k] -= lr * DENSE_LR_SCALE / (self.dense_g2[k].sqrt() + 1e-4) * g;
+                if let Some(l) = lang {
+                    self.lang_g2[l][k] += g * g;
+                    self.lang[l][k] -= lr * DENSE_LR_SCALE / (self.lang_g2[l][k].sqrt() + 1e-4) * g;
+                }
+            }
+            -probs[s.target_idx].max(1e-12).ln()
+        }
+        /// Mean loss and top-1 (%) over held-out items.
+        fn evaluate(&self, items: &[RerankItem]) -> Option<(f64, f64)> {
+            if items.is_empty() {
+                return None;
+            }
+            let (mut loss, mut hits) = (0.0f64, 0usize);
+            for s in items {
+                let (probs, hit) = self.posterior(s);
+                loss -= probs[s.target_idx].max(1e-12).ln();
+                hits += usize::from(hit);
+            }
+            let n = items.len() as f64;
+            Some((loss / n, hits as f64 / n * 100.0))
+        }
+    }
+    let mut weights = Weights {
+        dense: W_DENSE.to_vec(),
+        dense_g2: vec![1.0; DENSE_DIM],
+        lang: vec![vec![0.0; DENSE_DIM]; langs.len()],
+        lang_g2: vec![vec![1.0; DENSE_DIM]; langs.len()],
+        sparse: vec![0.0; HASH_SIZE],
+        sparse_g2: vec![0.0; HASH_SIZE],
+    };
+
+    // Held-out dev set: the tail of the shuffled pairs, kept out of EM/LM and
+    // of reranker training.  It measures every batch (the table has ~1e6
+    // unregularised slots, so overfitting is the default failure) and it fixes
+    // the dense-feature normalisation below.
+    let dev_range = count - dev_reserved..count;
+    println!(
+        "Pre-decoding candidates for {} training pairs (dev reserved: {})...",
+        num_train_pairs,
+        dev_range.len()
+    );
+    let t0 = Instant::now();
+    let mut dense_stats = DenseStats::new();
+    let dev_jobs: Vec<(usize, Option<u8>)> = dev_range.clone().map(|i| (i, pair_lang[i])).collect();
+    let mut dev_items: Vec<RerankItem> = decode_all(&dev_jobs);
+    for item in &dev_items {
+        for f in &item.dense_feats {
+            dense_stats.push(f);
+        }
+    }
+    println!(
+        "Held-out dev set: {} of {} pairs have the gold in the candidate list (decoded in {:.2?}).",
+        dev_items.len(),
+        dev_range.len(),
+        t0.elapsed()
+    );
+    // One normalisation for training AND inference: measured on the dev
+    // candidate lists (decoded by this model), frozen, used to standardise
+    // every training batch, and packed into the container.  Training used to
+    // standardise with the compiled-in MEAN/STD_DENSE while the container
+    // shipped statistics re-measured at the end, so the learned weights were
+    // applied at inference to features on a 15-25% different scale.
+    let (norm_mean, norm_std) = dense_stats.finish();
+    let standardise = |item: &mut RerankItem| {
+        for f in item.dense_feats.iter_mut() {
+            for k in 0..DENSE_DIM {
+                f[k] = (f[k] - norm_mean[k]) / norm_std[k];
             }
         }
-        let n = items.len() as f64;
-        Some((loss / n, hits as f64 / n * 100.0))
-    }
+    };
+    dev_items.iter_mut().for_each(standardise);
+    println!(
+        "Dense-feature normalisation from {} dev candidates (emit mean {:.3} std {:.3}, lm mean {:.3} std {:.3}).",
+        dense_stats.n, norm_mean[0], norm_std[0], norm_mean[1], norm_std[1]
+    );
 
-    // Snapshot of the best weights (sparse + dense) by dev loss, so a run that
-    // starts overfitting does not have to be thrown away.
-    let mut best_dev: Option<(f64, Vec<f32>, Vec<f64>)> = None;
-
-    if let Some((l, a)) = dev_eval(&dev_items, &sparse_table, &dense_weights) {
+    // Snapshot of the best weights by dev loss, so a run that starts
+    // overfitting does not have to be thrown away.
+    type Snapshot = (Vec<f64>, Vec<Vec<f64>>, Vec<f32>);
+    let snapshot =
+        |w: &Weights| -> Snapshot { (w.dense.clone(), w.lang.clone(), w.sparse.clone()) };
+    let mut best_dev: Option<(f64, Snapshot)> = None;
+    if let Some((l, a)) = weights.evaluate(&dev_items) {
         println!("  dev before training: loss={l:.4} top-1={a:.2}%");
     }
 
-    if use_chunked {
-        let total_batches = num_train_pairs.div_ceil(BATCH_SIZE);
+    // Decode in batches of BATCH_SIZE (memory stays bounded) and run `epochs`
+    // passes over each batch before decoding the next.  The learning rate
+    // decays once per batch so the final batch runs at LR_FINAL_FRACTION of
+    // LR0; AdaGrad adapts per slot on top of that gentle global anneal.
+    const BATCH_SIZE: usize = 100_000;
+    const LR0: f64 = 0.05;
+    const LR_FINAL_FRACTION: f64 = 0.1;
+    // Share of training lists shown WITHOUT their language, so the shared
+    // weights also rank well on their own (language "auto").
+    const LANG_DROPOUT: f64 = 0.2;
+    let mut dropout_rng = ChaCha8Rng::seed_from_u64(seed ^ 0x6c61_6e67);
+    let total_batches = num_train_pairs.div_ceil(BATCH_SIZE).max(1);
+    let lr_decay = LR_FINAL_FRACTION.powf(1.0 / total_batches as f64);
+    let mut lr = LR0;
+    let mut global_samples = 0usize;
+    for batch_idx in 0..total_batches {
+        let range = batch_idx * BATCH_SIZE..((batch_idx + 1) * BATCH_SIZE).min(num_train_pairs);
+        let batch_t0 = Instant::now();
         println!(
-            "  Chunked mode: {} batches of {} (memory bounded, decode once per batch, {} epochs per batch)",
-            total_batches, BATCH_SIZE, epochs
+            "  Batch {}/{}: decoding {} pairs ...",
+            batch_idx + 1,
+            total_batches,
+            range.len()
         );
-        // One gentle decay per batch, sized so the final batch runs at
-        // LR_FINAL_FRACTION of the initial rate regardless of batch count.
-        let lr_decay_per_batch = LR_FINAL_FRACTION.powf(1.0 / total_batches.max(1) as f64);
-        let mut global_samples: usize = 0;
-        // Decode once per batch and train `epochs` passes over that batch before moving to next.
-        // This is ~5x faster than re-decoding per global epoch (was 18h for 3.59M) and keeps
-        // memory bounded to one batch.
-        for batch_idx in 0..total_batches {
-            let start = batch_idx * BATCH_SIZE;
-            let end = (start + BATCH_SIZE).min(num_train_pairs);
-            let batch = &raw_pairs[start..end];
-            let batch_t0 = Instant::now();
-            println!(
-                "  Batch {}/{}: decoding {} pairs ...",
-                batch_idx + 1,
-                total_batches,
-                batch.len()
-            );
-            let mut samples: Vec<RerankItem> = Vec::with_capacity(batch.len());
-            for (roman, gold) in batch {
-                let cands = decoder.decode_union(roman, RERANK_DECODE_DEPTH, Some(&word_trie));
-                let (order, heur, heur_rank) = rank_candidates(&cands, &vocab_freq);
-                if let Some(target_idx) = order.iter().position(|c| c.dev == *gold) {
-                    let cand_sparse: Vec<Vec<usize>> = order
-                        .iter()
-                        .map(|c| {
-                            let aks = akshar_ime::core::akshara::segment(&c.dev);
-                            extract_sparse_features(&c.dev, roman, c.akshara_count, &aks)
-                        })
-                        .collect();
-                    let dense_feats: Vec<[f64; DENSE_DIM]> = order
-                        .iter()
-                        .enumerate()
-                        .map(|(idx, c)| {
-                            let raw = extract_dense_features(
-                                c,
-                                idx,
-                                heur[idx],
-                                heur_rank[idx],
-                                roman,
-                                &vocab_freq,
-                                &ranks,
-                            );
-                            // Exp 5: accumulate RAW features so finish() yields
-                            // the true distribution; z-scores (mean~0/std~1)
-                            // would describe the old constants, not the data.
-                            dense_stats.push(&raw);
-                            let mut z = [0.0f64; DENSE_DIM];
-                            for k in 0..DENSE_DIM {
-                                let sd = STD_DENSE[k];
-                                z[k] = if sd.abs() > 1e-12 {
-                                    (raw[k] - MEAN_DENSE[k]) / sd
-                                } else {
-                                    0.0
-                                };
-                            }
-                            z
-                        })
-                        .collect();
-                    samples.push(RerankItem {
-                        target_idx,
-                        dense_feats,
-                        sparse: cand_sparse,
-                    });
-                }
-            }
-            println!(
-                "    -> {} valid (decoded in {:.1?})",
-                samples.len(),
-                batch_t0.elapsed()
-            );
-            // Train `epochs` passes over this batch before moving on (~5x less decode)
-            let mut batch_loss: f64 = 0.0;
-            for _ep in 1..=epochs {
-                for s in &samples {
-                    let mut scores: Vec<f64> = s
-                        .dense_feats
-                        .iter()
-                        .map(|z| {
-                            dense_weights
-                                .iter()
-                                .zip(z.iter())
-                                .map(|(w, x)| w * x)
-                                .sum::<f64>()
-                        })
-                        .collect();
-                    for (idx, sparse_feats) in s.sparse.iter().enumerate() {
-                        for &h in sparse_feats {
-                            scores[idx] += f64::from(sparse_table[h]);
-                        }
-                    }
-                    let max_s = scores.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-                    let exp_s: Vec<f64> = scores.iter().map(|&sc| (sc - max_s).exp()).collect();
-                    let sum_exp: f64 = exp_s.iter().sum();
-                    let probs: Vec<f64> = exp_s.iter().map(|&e| e / (sum_exp + 1e-12)).collect();
-                    batch_loss += -probs[s.target_idx].max(1e-12).ln();
-                    let mut sample_dense_grad = [0.0f64; DENSE_DIM];
-                    for (idx, p) in probs.iter().enumerate() {
-                        let grad = if idx == s.target_idx { *p - 1.0 } else { *p };
-                        if grad.abs() > 1e-5 {
-                            // Update sparse weights
-                            for &h in &s.sparse[idx] {
-                                let g = grad as f32;
-                                grad_sq[h] += g * g;
-                                let eff_lr = (lr as f32) / (grad_sq[h].sqrt() + 1e-4);
-                                sparse_table[h] -= eff_lr * g;
-                            }
-                            // Accumulate true sample gradient for dense weights:
-                            // dL/dw_k = sum_idx (p_idx - y_idx) * z_{idx, k}
-                            for (k, grad_val) in sample_dense_grad.iter_mut().enumerate() {
-                                *grad_val += grad * s.dense_feats[idx][k];
-                            }
-                        }
-                    }
-                    // Apply dense weight update once per sample
-                    for (k, &gd) in sample_dense_grad.iter().enumerate() {
-                        if gd.abs() > 1e-6 {
-                            dense_grad_sq[k] += gd * gd;
-                            let eff_lr_d = lr * DENSE_LR_SCALE / (dense_grad_sq[k].sqrt() + 1e-4);
-                            dense_weights[k] -= eff_lr_d * gd;
-                        }
-                    }
-                }
-            }
-            global_samples += samples.len() * epochs;
-            batch_loss /= epochs as f64 * samples.len().max(1) as f64;
-            println!(
-                "    Batch {}/{} done: avg loss {:.4} ({} samples, lr {:.4})",
-                batch_idx + 1,
-                total_batches,
-                batch_loss,
-                samples.len(),
-                lr
-            );
-            if let Some((dl, da)) = dev_eval(&dev_items, &sparse_table, &dense_weights) {
-                let better = best_dev.as_ref().is_none_or(|(b, _, _)| dl < *b);
-                println!(
-                    "      dev: loss={dl:.4} top-1={da:.2}%{}",
-                    if better { "  <- best" } else { "" }
-                );
-                if better {
-                    best_dev = Some((dl, sparse_table.clone(), dense_weights.clone()));
-                }
-            }
-            lr *= lr_decay_per_batch;
-        }
+        // Dropout decisions are drawn in order, before the parallel decode, so
+        // a run is reproducible whatever the thread count.
+        let jobs: Vec<(usize, Option<u8>)> = range
+            .map(|i| {
+                let keep = !rand::Rng::gen_bool(&mut dropout_rng, LANG_DROPOUT);
+                (i, pair_lang[i].filter(|_| keep))
+            })
+            .collect();
+        let mut samples = decode_all(&jobs);
+        samples.iter_mut().for_each(standardise);
         println!(
-            "  Chunked training done: {} samples processed in {:.2?}",
-            global_samples,
-            rank_t0.elapsed()
-        );
-    } else {
-        // Original in-memory path for smaller training sets (faster)
-        let decode_t0 = Instant::now();
-        let mut samples: Vec<RerankItem> = Vec::with_capacity(num_train_pairs);
-        for (roman, gold) in &raw_pairs[..num_train_pairs] {
-            let cands = decoder.decode_union(roman, RERANK_DECODE_DEPTH, Some(&word_trie));
-            let (order, heur, heur_rank) = rank_candidates(&cands, &vocab_freq);
-            if let Some(target_idx) = order.iter().position(|c| c.dev == *gold) {
-                let cand_sparse: Vec<Vec<usize>> = order
-                    .iter()
-                    .map(|c| {
-                        let aks = akshar_ime::core::akshara::segment(&c.dev);
-                        extract_sparse_features(&c.dev, roman, c.akshara_count, &aks)
-                    })
-                    .collect();
-                let dense_feats: Vec<[f64; DENSE_DIM]> = order
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, c)| {
-                        let raw = extract_dense_features(
-                            c,
-                            idx,
-                            heur[idx],
-                            heur_rank[idx],
-                            roman,
-                            &vocab_freq,
-                            &ranks,
-                        );
-                        // Exp 5: raw distribution, not z-scores (see chunked path).
-                        dense_stats.push(&raw);
-                        let mut z = [0.0f64; DENSE_DIM];
-                        for k in 0..DENSE_DIM {
-                            let sd = STD_DENSE[k];
-                            z[k] = if sd.abs() > 1e-12 {
-                                (raw[k] - MEAN_DENSE[k]) / sd
-                            } else {
-                                0.0
-                            };
-                        }
-                        z
-                    })
-                    .collect();
-                samples.push(RerankItem {
-                    target_idx,
-                    dense_feats,
-                    sparse: cand_sparse,
-                });
-            }
-        }
-        println!(
-            "Pre-decoded {} valid samples with targets in candidate list in {:.2?}.",
+            "    -> {} valid (decoded in {:.1?})",
             samples.len(),
-            decode_t0.elapsed()
+            batch_t0.elapsed()
         );
-
-        for ep in 1..=epochs {
-            let mut ep_loss: f64 = 0.0;
-            let mut ep_hits: usize = 0;
+        let mut batch_loss = 0.0f64;
+        for _ in 0..epochs {
             for s in &samples {
-                let mut scores: Vec<f64> = s
-                    .dense_feats
-                    .iter()
-                    .map(|z| {
-                        dense_weights
-                            .iter()
-                            .zip(z.iter())
-                            .map(|(w, x)| w * x)
-                            .sum::<f64>()
-                    })
-                    .collect();
-                for (idx, sparse_feats) in s.sparse.iter().enumerate() {
-                    for &h in sparse_feats {
-                        scores[idx] += f64::from(sparse_table[h]);
-                    }
-                }
-                let max_s = scores.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-                let exp_s: Vec<f64> = scores.iter().map(|&sc| (sc - max_s).exp()).collect();
-                let sum_exp: f64 = exp_s.iter().sum();
-                let probs: Vec<f64> = exp_s.iter().map(|&e| e / (sum_exp + 1e-12)).collect();
-                ep_loss += -probs[s.target_idx].max(1e-12).ln();
-                if probs
-                    .iter()
-                    .enumerate()
-                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-                    .is_some_and(|(i, _)| i == s.target_idx)
-                {
-                    ep_hits += 1;
-                }
-                let mut sample_dense_grad = [0.0f64; DENSE_DIM];
-                for (idx, p) in probs.iter().enumerate() {
-                    let grad = if idx == s.target_idx { *p - 1.0 } else { *p };
-                    if grad.abs() > 1e-5 {
-                        // Update sparse weights
-                        for &h in &s.sparse[idx] {
-                            let g = grad as f32;
-                            grad_sq[h] += g * g;
-                            let eff_lr = (lr as f32) / (grad_sq[h].sqrt() + 1e-4);
-                            sparse_table[h] -= eff_lr * g;
-                        }
-                        // Accumulate true sample gradient for dense weights:
-                        // dL/dw_k = sum_idx (p_idx - y_idx) * z_{idx, k}
-                        for (k, grad_val) in sample_dense_grad.iter_mut().enumerate() {
-                            *grad_val += grad * s.dense_feats[idx][k];
-                        }
-                    }
-                }
-                // Apply dense weight update once per sample
-                for (k, &gd) in sample_dense_grad.iter().enumerate() {
-                    if gd.abs() > 1e-6 {
-                        dense_grad_sq[k] += gd * gd;
-                        let eff_lr_d = lr * DENSE_LR_SCALE / (dense_grad_sq[k].sqrt() + 1e-4);
-                        dense_weights[k] -= eff_lr_d * gd;
-                    }
-                }
-            }
-            lr *= 0.8;
-            if !samples.is_empty() {
-                let dev = dev_eval(&dev_items, &sparse_table, &dense_weights);
-                let better = match (&dev, &best_dev) {
-                    (Some((dl, _)), Some((b, _, _))) => dl < b,
-                    (Some(_), None) => true,
-                    _ => false,
-                };
-                println!(
-                    "  Epoch {}/{}: train loss={:.4} top-1={:.2}%{}",
-                    ep,
-                    epochs,
-                    ep_loss / samples.len() as f64,
-                    ep_hits as f64 / samples.len() as f64 * 100.0,
-                    match dev {
-                        Some((dl, da)) => format!(
-                            "  |  dev loss={dl:.4} top-1={da:.2}%{}",
-                            if better { "  <- best" } else { "" }
-                        ),
-                        None => String::new(),
-                    }
-                );
-                if let (Some((dl, _)), true) = (dev, better) {
-                    best_dev = Some((dl, sparse_table.clone(), dense_weights.clone()));
-                }
+                batch_loss += weights.step(s, lr);
             }
         }
+        global_samples += samples.len() * epochs;
+        batch_loss /= (epochs * samples.len()).max(1) as f64;
+        println!(
+            "    Batch {}/{} done: avg loss {:.4} ({} samples, lr {:.4})",
+            batch_idx + 1,
+            total_batches,
+            batch_loss,
+            samples.len(),
+            lr
+        );
+        if let Some((dl, da)) = weights.evaluate(&dev_items) {
+            let better = best_dev.as_ref().is_none_or(|(b, _)| dl < *b);
+            println!(
+                "      dev: loss={dl:.4} top-1={da:.2}%{}",
+                if better { "  <- best" } else { "" }
+            );
+            if better {
+                best_dev = Some((dl, snapshot(&weights)));
+            }
+        }
+        lr *= lr_decay;
     }
+    println!("  Trained on {global_samples} samples.");
     println!("Reranker trained in {:.2?}.", rank_t0.elapsed());
 
     // Phase 4: Pack
@@ -927,20 +916,21 @@ fn main() -> Result<()> {
 
     // Pack the weights that scored best on held-out data, not necessarily the
     // last ones: with ~1e6 unregularised sparse slots, later batches can overfit.
-    if let Some((dl, best_sparse, best_dense)) = best_dev {
-        let final_dl = dev_eval(&dev_items, &sparse_table, &dense_weights).map(|(l, _)| l);
+    if let Some((dl, best)) = best_dev {
+        let final_dl = weights.evaluate(&dev_items).map(|(l, _)| l);
         if final_dl.is_some_and(|f| f > dl + 1e-9) {
             println!(
                 "Packing the best-by-dev weights (dev loss {:.4}) rather than the final ({:.4}).",
                 dl,
                 final_dl.unwrap_or(f64::NAN)
             );
-            sparse_table = best_sparse;
-            dense_weights = best_dense;
+            (weights.dense, weights.lang, weights.sparse) = best;
         } else {
             println!("Final weights are the best by dev loss ({dl:.4}).");
         }
     }
+    let dense_weights = weights.dense;
+    let sparse_table = weights.sparse;
 
     // Set the quantization scale from a high percentile of the non-zero weights
     // and clip the tail, rather than from the single largest weight.  One
@@ -980,8 +970,31 @@ fn main() -> Result<()> {
         sparse_scale
     );
 
-    println!("Pruning unreferenced aksharas and cleaning out-of-vocabulary transitions...");
+    // Keep an akshara when the model was trained on it at least
+    // --min-akshara-count times, or when the vocabulary uses it.  Pruning used
+    // to keep ONLY the vocabulary's aksharas; with a single-language corpus
+    // vocabulary that deleted every syllable the other languages need (all of
+    // Marathi's ळ forms, Hindi's nukta/chandra forms, Sanskrit's visarga
+    // clusters), so 6-13% of their words could not be produced at all.  The
+    // count floor still drops one-off noise from the pair data.
+    println!(
+        "Pruning aksharas seen < {min_akshara_count} times in training (and not in the vocabulary)..."
+    );
     let mut seen_aks = std::collections::HashSet::new();
+    for (a, &n) in &akshara_count {
+        if n >= min_akshara_count {
+            if let Some(id) = translit_model.akshara_id(a) {
+                seen_aks.insert(id);
+            }
+        }
+    }
+    drop(akshara_count);
+    // The end-of-word token is in no word, so the rules above would drop it --
+    // and with it every P(</w> | ...) transition.  That silently disabled
+    // end-of-word modelling in every model packed before this line existed.
+    if let Some(eow) = translit_model.akshara_id(akshar_ime::core::translit_model::END_OF_WORD) {
+        seen_aks.insert(eow);
+    }
     for word in vocab_freq.keys() {
         for a in akshar_ime::core::akshara::segment(word) {
             if let Some(id) = translit_model.akshara_id(&a) {
@@ -1040,11 +1053,7 @@ fn main() -> Result<()> {
         before_em, after_em
     );
 
-    let (dense_mean, dense_std) = dense_stats.finish();
-    println!(
-        "Dense-feature statistics from {} candidate scorings (emit mean {:.3} std {:.3}, lm mean {:.3} std {:.3})",
-        dense_stats.n, dense_mean[0], dense_std[0], dense_mean[1], dense_std[1]
-    );
+    let (dense_mean, dense_std) = (norm_mean.clone(), norm_std.clone());
     let mut unified = UnifiedModel::new(
         translit_model,
         quantized_table,
@@ -1056,6 +1065,8 @@ fn main() -> Result<()> {
     unified.dense_mean = dense_mean;
     unified.dense_std = dense_std;
     unified.dense_weights = dense_weights;
+    unified.langs = langs;
+    unified.dense_lang_weights = weights.lang;
     unified
         .save(&out_path)
         .map_err(|e| anyhow::anyhow!("save unified model: {e}"))?;
