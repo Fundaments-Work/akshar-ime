@@ -145,3 +145,8 @@ path = "src/bin/build/probe_model.rs"
 [[bin]]
 name = "prune_model"
 path = "src/bin/build/prune_model.rs"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

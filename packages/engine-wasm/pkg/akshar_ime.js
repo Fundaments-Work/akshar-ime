@@ -168,26 +168,6 @@ export function createEngineFromModelUrl(model_url) {
     return ret;
 }
 
-/**
- * Transliterate without needing an engine instance, using an empty model — mainly for testing wiring.
- * @param {string} roman
- * @returns {string}
- */
-export function quickTransliterate(roman) {
-    let deferred2_0;
-    let deferred2_1;
-    try {
-        const ptr0 = passStringToWasm0(roman, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.quickTransliterate(ptr0, len0);
-        deferred2_0 = ret[0];
-        deferred2_1 = ret[1];
-        return getStringFromWasm0(ret[0], ret[1]);
-    } finally {
-        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
-    }
-}
-
 export function init_panic_hook() {
     wasm.init_panic_hook();
 }
@@ -234,12 +214,32 @@ export function getVersion() {
     }
 }
 
-function __wbg_adapter_22(arg0, arg1, arg2) {
-    wasm.closure80_externref_shim(arg0, arg1, arg2);
+/**
+ * Transliterate without needing an engine instance, using an empty model — mainly for testing wiring.
+ * @param {string} roman
+ * @returns {string}
+ */
+export function quickTransliterate(roman) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const ptr0 = passStringToWasm0(roman, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.quickTransliterate(ptr0, len0);
+        deferred2_0 = ret[0];
+        deferred2_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+    }
 }
 
-function __wbg_adapter_78(arg0, arg1, arg2, arg3) {
-    wasm.closure94_externref_shim(arg0, arg1, arg2, arg3);
+function __wbg_adapter_22(arg0, arg1, arg2) {
+    wasm.closure91_externref_shim(arg0, arg1, arg2);
+}
+
+function __wbg_adapter_82(arg0, arg1, arg2, arg3) {
+    wasm.closure115_externref_shim(arg0, arg1, arg2, arg3);
 }
 
 const WasmEngineFinalization = (typeof FinalizationRegistry === 'undefined')
@@ -337,6 +337,19 @@ export class WasmEngine {
         if (ret[1]) {
             throw takeFromExternrefTable0(ret[0]);
         }
+    }
+    /**
+     * Rank suggestions for one language: an ISO 639-3 code ("hin", "nep",
+     * ...) or ISO 639-1 alias ("hi"); null, "" or "auto" for language-blind.
+     * Returns false if the model does not support it (auto is used).
+     * @param {string | null} [code]
+     * @returns {boolean}
+     */
+    setLanguage(code) {
+        var ptr0 = isLikeNone(code) ? 0 : passStringToWasm0(code, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmengine_setLanguage(this.__wbg_ptr, ptr0, len0);
+        return ret !== 0;
     }
     /**
      * How many learned words are stored.
@@ -437,6 +450,16 @@ export class WasmEngine {
     isReady() {
         const ret = wasm.wasmengine_isReady(this.__wbg_ptr);
         return ret !== 0;
+    }
+    /**
+     * Languages the model can rank for (ISO 639-3 codes).
+     * @returns {any[]}
+     */
+    languages() {
+        const ret = wasm.wasmengine_languages(this.__wbg_ptr);
+        var v1 = getArrayJsValueFromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
     }
 }
 
@@ -539,7 +562,7 @@ function __wbg_get_imports() {
                 const a = state0.a;
                 state0.a = 0;
                 try {
-                    return __wbg_adapter_78(a, state0.b, arg0, arg1);
+                    return __wbg_adapter_82(a, state0.b, arg0, arg1);
                 } finally {
                     state0.a = a;
                 }
@@ -634,8 +657,8 @@ function __wbg_get_imports() {
         const ret = false;
         return ret;
     };
-    imports.wbg.__wbindgen_closure_wrapper564 = function(arg0, arg1, arg2) {
-        const ret = makeMutClosure(arg0, arg1, 81, __wbg_adapter_22);
+    imports.wbg.__wbindgen_closure_wrapper501 = function(arg0, arg1, arg2) {
+        const ret = makeMutClosure(arg0, arg1, 92, __wbg_adapter_22);
         return ret;
     };
     imports.wbg.__wbindgen_init_externref_table = function() {

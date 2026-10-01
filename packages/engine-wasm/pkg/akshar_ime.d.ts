@@ -4,10 +4,6 @@
  * Create engine from model URL only (convenience, lexicon optional).
  */
 export function createEngineFromModelUrl(model_url: string): Promise<WasmEngine>;
-/**
- * Transliterate without needing an engine instance, using an empty model — mainly for testing wiring.
- */
-export function quickTransliterate(roman: string): string;
 export function init_panic_hook(): void;
 /**
  * Async factory: fetch model (+ optional lexicon/weights) from URLs and create engine.
@@ -24,6 +20,10 @@ export function createEngine(model_url: string, lexicon_url?: string | null, rer
  * Returns the engine version (crate version).
  */
 export function getVersion(): string;
+/**
+ * Transliterate without needing an engine instance, using an empty model — mainly for testing wiring.
+ */
+export function quickTransliterate(roman: string): string;
 export class WasmEngine {
   free(): void;
   /**
@@ -50,6 +50,12 @@ export class WasmEngine {
    * Import learned state from base64 string.
    */
   importState(b64: string): void;
+  /**
+   * Rank suggestions for one language: an ISO 639-3 code ("hin", "nep",
+   * ...) or ISO 639-1 alias ("hi"); null, "" or "auto" for language-blind.
+   * Returns false if the model does not support it (auto is used).
+   */
+  setLanguage(code?: string | null): boolean;
   /**
    * How many learned words are stored.
    */
@@ -84,6 +90,10 @@ export class WasmEngine {
    * Returns true if model is loaded and valid (not empty fallback).
    */
   isReady(): boolean;
+  /**
+   * Languages the model can rank for (ISO 639-3 codes).
+   */
+  languages(): any[];
 }
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
@@ -103,8 +113,10 @@ export interface InitOutput {
   readonly wasmengine_getSuggestionsWithScores: (a: number, b: number, c: number, d: number) => [number, number];
   readonly wasmengine_importState: (a: number, b: number, c: number) => [number, number];
   readonly wasmengine_isReady: (a: number) => number;
+  readonly wasmengine_languages: (a: number) => [number, number];
   readonly wasmengine_learnedCount: (a: number) => number;
   readonly wasmengine_resetLearning: (a: number) => [number, number];
+  readonly wasmengine_setLanguage: (a: number, b: number, c: number) => number;
   readonly wasmengine_transliterate: (a: number, b: number, c: number) => [number, number];
   readonly wasmengine_vocabSize: (a: number) => number;
   readonly init_panic_hook: () => void;
@@ -117,8 +129,8 @@ export interface InitOutput {
   readonly __externref_table_dealloc: (a: number) => void;
   readonly __wbindgen_free: (a: number, b: number, c: number) => void;
   readonly __externref_drop_slice: (a: number, b: number) => void;
-  readonly closure80_externref_shim: (a: number, b: number, c: any) => void;
-  readonly closure94_externref_shim: (a: number, b: number, c: any, d: any) => void;
+  readonly closure91_externref_shim: (a: number, b: number, c: any) => void;
+  readonly closure115_externref_shim: (a: number, b: number, c: any, d: any) => void;
   readonly __wbindgen_start: () => void;
 }
 

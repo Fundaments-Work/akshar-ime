@@ -186,14 +186,61 @@ export const AksharIME = {
       }
     };
 
-    const commit = (index, appendSpace = false) => {
+    const insertPurnabiram = (trailing = '') => {
+      const purna = '।';
+      const danda = '॥';
+      if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+        const val = el.value;
+        const pos = el.selectionStart ?? val.length;
+        const prev = val.slice(pos - 1, pos);
+        if (prev === purna) {
+          el.value = val.slice(0, pos - 1) + danda + trailing + val.slice(pos);
+          const newPos = pos + trailing.length;
+          el.setSelectionRange(newPos, newPos);
+        } else if (prev === danda) {
+          el.value = val.slice(0, pos - 1) + '...' + trailing + val.slice(pos);
+          const newPos = pos + 2 + trailing.length;
+          el.setSelectionRange(newPos, newPos);
+        } else {
+          el.value = val.slice(0, pos) + purna + trailing + val.slice(pos);
+          const newPos = pos + 1 + trailing.length;
+          el.setSelectionRange(newPos, newPos);
+        }
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      } else {
+        const sel = window.getSelection();
+        if (sel && sel.rangeCount) {
+          const range = sel.getRangeAt(0);
+          const node = range.startContainer;
+          if (node && node.nodeType === Node.TEXT_NODE) {
+            const offset = range.startOffset;
+            const text = node.textContent || '';
+            const prev = text.slice(offset - 1, offset);
+            if (prev === purna) {
+              node.textContent = text.slice(0, offset - 1) + danda + trailing + text.slice(offset);
+              range.setStart(node, offset + trailing.length);
+              range.collapse(true);
+            } else {
+              node.textContent = text.slice(0, offset) + purna + trailing + text.slice(offset);
+              range.setStart(node, offset + 1 + trailing.length);
+              range.collapse(true);
+            }
+            sel.removeAllRanges();
+            sel.addRange(range);
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+          }
+        }
+      }
+    };
+
+    const commit = (index, appendSpace = false, trailingText = '') => {
       const dev = state.suggestions[index];
       const roman = state.lastWord;
       if (!dev || !roman) return;
       const info = getWordInfo();
       if (!info) return;
 
-      const insertText = appendSpace ? dev + ' ' : dev;
+      const insertText = (appendSpace ? dev + ' ' : dev) + trailingText;
 
       if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
         const before = info.value.slice(0, info.start);
@@ -238,6 +285,17 @@ export const AksharIME = {
     };
 
     const onKeyDown = (e) => {
+      // Purna biram (।) and double danda (॥)
+      if (e.key === '.' || e.key === '|') {
+        e.preventDefault();
+        if (state.suggestions.length && box.style.display !== 'none') {
+          commit(state.selected, false, '।');
+        } else {
+          insertPurnabiram();
+        }
+        return;
+      }
+
       if (box.style.display === 'none' || !state.suggestions.length) {
         return;
       }
