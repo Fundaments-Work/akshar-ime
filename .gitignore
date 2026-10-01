@@ -23,6 +23,7 @@ dist
 data/*
 !data/README.md
 docs/paper/*.aux
+*.pdf
 
 # Reference papers fetched for research; never tracked.
 papers_to_read/

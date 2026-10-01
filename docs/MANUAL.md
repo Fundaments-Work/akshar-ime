@@ -1484,7 +1484,7 @@ which is not how an IME is used. `evaluate_sentences` measures in-context
 accuracy on held-out running text and is the more realistic figure; it is
 reported less often here simply because it has changed less.
 
-**Vocabulary overlap.** The frequency prior is built from a news-domain corpus
+**Vocabulary overlap.** The frequency prior is built from a representative text corpus
 and the test set is drawn from a related distribution, so the prior's
 contribution (+5.64pp, §9.1) may not transfer to out-of-domain input.
 
