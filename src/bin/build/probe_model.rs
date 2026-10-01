@@ -184,7 +184,12 @@ fn main() {
 
     let word = word.unwrap_or_else(|| "holi".to_string());
 
-    let model = TranslitModel::load(Path::new(&model_path)).expect("load model");
+    let model = if let Ok(u) = akshar_ime::core::unified::UnifiedModel::load(Path::new(&model_path))
+    {
+        u.translit
+    } else {
+        TranslitModel::load(Path::new(&model_path)).expect("load model")
+    };
     let dec = ModelDecoder::new(model);
 
     let roman = word.to_ascii_lowercase();
@@ -207,6 +212,13 @@ fn main() {
     println!("\nTop 10 decodings:");
     for (d, w) in dec.decode(&roman, 10) {
         println!("  {d}  (weight {w:.3})");
+    }
+
+    println!("\nImeEngine Suggestions for `{}`:", roman);
+    let engine = akshar_ime::ImeEngine::new();
+    let sugs = engine.get_suggestions(&roman, 10);
+    for (s, sc) in sugs {
+        println!("  {s}  (score {sc})");
     }
 
     println!("\nKN stats:");

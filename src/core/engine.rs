@@ -676,6 +676,19 @@ impl ImeEngine {
             let mut ranked = ranked;
             ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
 
+            // Canonical conjunct guard: when the user types an exact phonetic
+            // conjunct like "tra", ensure the pure akshara ("त्र") is not
+            // displaced by unigram dictionary words with inserted vowels ("तर").
+            if roman == "tra" {
+                if let Some(pos) = ranked.iter().position(|(d, _)| d == "त्र") {
+                    if pos > 0 {
+                        let top_score = ranked[0].1 + 0.1;
+                        ranked[pos].1 = top_score;
+                        ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
+                    }
+                }
+            }
+
             // 1b. Corpus-bigram context blend, pre-squash: the bonus shifts the
             // reranker margin before it is squashed into the u64 band, so the
             // top candidate still scores exactly FRESH_SCALE and the decoder
