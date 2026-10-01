@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to release (e.g. v1.0.0, leave empty for manual run without release)'
+        description: 'Tag to release (e.g. v1.2.0, leave empty for manual run without release)'
         required: false
         default: ''
 
@@ -19,8 +19,6 @@ env:
 jobs:
   build-and-release:
     runs-on: ubuntu-latest
-    # wasm build only — model artifacts are trained locally and uploaded
-    # separately via `make release-upload TAG=...` (data/ is not in CI)
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -31,7 +29,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install system deps
+      - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libibus-1.0-dev libjansson-dev brotli
@@ -40,30 +38,43 @@ jobs:
         run: cargo install wasm-bindgen-cli --version 0.2.100 --locked
 
       - name: Build WASM package
-        run: bash wasm/build.sh
+        run: bash packages/engine-wasm/build.sh
 
-      - name: Package artifacts
+      - name: Build Native Linux Release
+        run: make release
+
+      - name: Package release artifacts
         run: |
-          ls -lh wasm/pkg/ js/akshar-ime.js web/index.html data/
-          # keep lexicon optional — upload if present (24 MB gzip, slow but GitHub infra fast)
-          echo "wasm/pkg sizes:"
-          du -sh wasm/pkg/*
-          gzip -c wasm/pkg/akshar_ime_bg.wasm | wc -c | awk '{printf "wasm gzip %d KB\n",$1/1024}'
+          mkdir -p dist
+          # WASM engine artifacts
+          cp packages/engine-wasm/pkg/akshar_ime_bg.wasm dist/
+          cp packages/engine-wasm/pkg/akshar_ime.js dist/
+          cp packages/engine-wasm/pkg/akshar_ime.d.ts dist/
+          cp packages/engine-wasm/pkg/akshar_ime_bg.wasm.d.ts dist/
+          cp packages/engine-js/akshar-ime.js dist/
+          tar -czf dist/akshar-ime-wasm.tar.gz -C packages/engine-wasm/pkg . -C ../../packages/engine-js akshar-ime.js
+          
+          # Native Linux artifacts
+          cp target/release/libakshar_ime.so dist/
+          cp target/release/devanagari-smart dist/
+          cp devanagari-smart.xml dist/
+          tar -czf dist/akshar-ime-linux-x86_64.tar.gz -C dist libakshar_ime.so devanagari-smart devanagari-smart.xml
+          
+          echo "=== Release Artifacts ==="
+          ls -lh dist/
 
       - name: Create / update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
           files: |
-            wasm/pkg/akshar_ime_bg.wasm
-            wasm/pkg/akshar_ime.js
-            wasm/pkg/akshar_ime.d.ts
-            wasm/pkg/akshar_ime_bg.wasm.d.ts
-            js/akshar-ime.js
-            web/index.html
+            dist/akshar_ime_bg.wasm
+            dist/akshar_ime.js
+            dist/akshar_ime.d.ts
+            dist/akshar_ime_bg.wasm.d.ts
+            dist/akshar-ime.js
+            dist/akshar-ime-wasm.tar.gz
+            dist/akshar-ime-linux-x86_64.tar.gz
           fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      # Model artifacts (data/translit_model.bin, data/word_freq_text.bin) are
-      # NOT built in CI — data/ is not in the repo. Train locally (`make data`)
-      # and upload them to the release: `make release-upload TAG=vX.Y.Z`.

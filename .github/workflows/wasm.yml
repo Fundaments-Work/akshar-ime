@@ -26,18 +26,17 @@ jobs:
         run: cargo install wasm-bindgen-cli --version 0.2.100 --locked
 
       - name: Build WASM package
-        run: bash wasm/build.sh
+        run: bash packages/engine-wasm/build.sh
 
-      - name: Check WASM demo builds
-        run: test -f wasm/pkg/akshar_ime_bg.wasm && test -f wasm/pkg/akshar_ime.js
+      - name: Verify WASM artifacts exist
+        run: |
+          test -f packages/engine-wasm/pkg/akshar_ime_bg.wasm
+          test -f packages/engine-wasm/pkg/akshar_ime.js
 
       - name: Upload WASM artifact
         uses: actions/upload-artifact@v4
         with:
           name: wasm-pkg
           path: |
-            wasm/pkg/
-            js/akshar-ime.js
-            web/index.html
-      # Release attachment happens in release.yml only (which also documents
-      # the model-artifact upload flow via `make release-upload TAG=...`).
+            packages/engine-wasm/pkg/
+            packages/engine-js/akshar-ime.js

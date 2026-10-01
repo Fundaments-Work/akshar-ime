@@ -19,7 +19,7 @@
  * Learned words persist in localStorage.
  */
 
-import initWasm, { WasmEngine, createEngine, getVersion } from '../wasm/pkg/akshar_ime.js';
+import initWasm, { WasmEngine, createEngine, getVersion } from '../engine-wasm/pkg/akshar_ime.js';
 
 // ----- public API -----
 export const AksharIME = {
@@ -55,7 +55,7 @@ export const AksharIME = {
       } else {
         await initWasm();
       }
-      try { const { init_panic_hook } = await import('../wasm/pkg/akshar_ime.js'); init_panic_hook(); } catch {}
+      try { const { init_panic_hook } = await import('../engine-wasm/pkg/akshar_ime.js'); init_panic_hook(); } catch {}
 
       const engine = await createEngine(
         modelUrl,

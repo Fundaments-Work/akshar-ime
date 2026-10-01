@@ -25,10 +25,11 @@ Read in this order:
 | `2026-09-22-attestation-training.md` | Sep 22 | Attestation-weighted train-mid: entities +13, native −8, pooled +5 (noise) — killed as ship candidate; flag kept, artifact local-only. |
 | `2026-09-08-experiment-report.md` | Sep 8 | Component ablation report (which ideas carry accuracy); superseded by MANUAL §9 but kept for the raw tables. |
 | `correctness-audit-2026-09-10.md` | Sep 10 | Correctness-first audit: 14 fixes + train-mid validation; completed, all landed. |
+| `devanagari-script-plan.md` | Sep 22 | Devanagari multi-language architecture: shared FST lexicon, position-synchronous search, language conditioning. Completed & landed. |
+| `playground-extension.md` | Sep 22 | Migration plan moving browser playground to standalone repo `Fundaments-Work/akshar-playground`. Completed & landed. |
 
 There are currently no live planning documents — `docs/plans/` holds only this
-archive. The live roadmap is `docs/MANUAL.md` §12–13, and the mathematics and
-the final measurements are in `docs/MANUAL.md`.
+archive and the ongoing research agenda (`research-agenda.md`). The live roadmap is `docs/MANUAL.md` §18.
 
 **Caution: the accuracy figures in these documents are historical.** They were
 measured before the 2026-09-06 defect fixes and do not describe the shipped

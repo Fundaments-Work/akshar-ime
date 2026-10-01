@@ -16,7 +16,8 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          targets: wasm32-unknown-unknown
+          components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
 
@@ -28,19 +29,5 @@ jobs:
       - name: Build (Rust library + C engine)
         run: make release
 
-      - name: Format check
-        run: cargo fmt --check
-
-      - name: Clippy
-        run: cargo clippy --release --all-targets -- -D warnings
-
-      - name: Test
-        run: cargo test --release
-
-      - name: WASM target check
-        run: |
-          if rustup target list --installed 2>/dev/null | grep -q wasm32-unknown-unknown; then
-            cargo check --features wasm --target wasm32-unknown-unknown
-          else
-            echo "wasm32 target not installed; skipping"
-          fi
+      - name: Run verification checks (make check)
+        run: make check
