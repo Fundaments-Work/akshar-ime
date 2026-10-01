@@ -15,7 +15,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/sapienskid/akshar-ime"
+    "url": "https://github.com/Fundaments-Work/akshar-ime"
   },
   "scripts": {
     "build": "./build.sh",

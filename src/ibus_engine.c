@@ -194,13 +194,18 @@ static gboolean ibus_devanagari_engine_process_key_event(IBusEngine *engine, gui
     {
     case IBUS_KEY_Return:
     case IBUS_KEY_KP_Enter:
-    case IBUS_KEY_space:
     case IBUS_KEY_Tab:
-        // With a word pending the key only commits it; otherwise it is the
-        // application's.
+        // With a word pending the key commits the highlighted candidate.
         if (!has_preedit)
             return FALSE;
         commit_preedit(self);
+        return TRUE;
+    case IBUS_KEY_space:
+        // Space commits the highlighted candidate AND advances with a space.
+        if (!has_preedit)
+            return FALSE;
+        commit_preedit(self);
+        commit_string(engine, " ");
         return TRUE;
     case IBUS_KEY_Escape:
         if (!has_preedit)
@@ -216,6 +221,19 @@ static gboolean ibus_devanagari_engine_process_key_event(IBusEngine *engine, gui
                               self->preedit->str);
         update_preedit_and_lookup(self);
         return TRUE;
+    }
+
+    // Direct candidate selection with number keys 1-9 while preedit is active.
+    if (has_preedit && keyval >= '1' && keyval <= '9')
+    {
+        guint idx = keyval - '1';
+        guint n = ibus_lookup_table_get_number_of_candidates(self->table);
+        if (idx < n)
+        {
+            ibus_lookup_table_set_cursor_pos(self->table, idx);
+            commit_preedit(self);
+            return TRUE;
+        }
     }
 
     // Letters build the roman word.

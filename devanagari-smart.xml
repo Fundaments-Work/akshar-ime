@@ -9,7 +9,7 @@
     <version>1.3.0</version>
     <author>Sabin</author>
     <license>MIT</license>
-    <homepage>https://github.com/sapienskid/akshar-ime</homepage>
+    <homepage>https://github.com/Fundaments-Work/akshar-ime</homepage>
     <textdomain>devanagari-smart</textdomain>
     <engines>
         <!-- Auto: ranks language-blind across every Devanagari language. -->

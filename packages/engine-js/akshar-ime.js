@@ -186,34 +186,37 @@ export const AksharIME = {
       }
     };
 
-    const commit = (index) => {
+    const commit = (index, appendSpace = false) => {
       const dev = state.suggestions[index];
       const roman = state.lastWord;
       if (!dev || !roman) return;
       const info = getWordInfo();
       if (!info) return;
 
+      const insertText = appendSpace ? dev + ' ' : dev;
+
       if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
         const before = info.value.slice(0, info.start);
         const after = info.value.slice(info.end);
-        el.value = before + dev + after;
-        const newPos = before.length + dev.length;
+        el.value = before + insertText + after;
+        const newPos = before.length + insertText.length;
         el.setSelectionRange(newPos, newPos);
         el.dispatchEvent(new Event('input', { bubbles: true }));
       } else {
         // contenteditable: replace text node slice
         const node = window.getSelection().getRangeAt(0).startContainer;
-        if (node.nodeType === Node.TEXT_NODE) {
+        if (node && node.nodeType === Node.TEXT_NODE) {
           const before = node.textContent.slice(0, info.start);
           const after = node.textContent.slice(info.end);
-          node.textContent = before + dev + after;
-          const newOffset = before.length + dev.length;
+          node.textContent = before + insertText + after;
+          const newOffset = before.length + insertText.length;
           const r = document.createRange();
           r.setStart(node, newOffset);
           r.collapse(true);
           const sel = window.getSelection();
           sel.removeAllRanges();
           sel.addRange(r);
+          el.dispatchEvent(new Event('input', { bubbles: true }));
         }
       }
       engine.confirm(roman.toLowerCase(), dev);
@@ -236,7 +239,6 @@ export const AksharIME = {
 
     const onKeyDown = (e) => {
       if (box.style.display === 'none' || !state.suggestions.length) {
-        // allow space to still trigger learning if needed, but not navigation
         return;
       }
       if (e.key === 'ArrowDown') {
@@ -248,24 +250,23 @@ export const AksharIME = {
         state.selected = (state.selected - 1 + state.suggestions.length) % state.suggestions.length;
         render();
       } else if (e.key === 'Enter' || e.key === 'Tab') {
-        if (state.suggestions.length) {
-          e.preventDefault();
-          commit(state.selected);
-        }
+        e.preventDefault();
+        commit(state.selected, false);
       } else if (e.key === 'Escape') {
         e.preventDefault();
         hide();
-      } else if (e.key === ' ' && state.opts.autoConfirmOnSpace) {
-        // Space confirms top suggestion automatically? Optional behavior:
-        // We do NOT auto-commit on space by default for predictability; only Enter/Tab commits.
-        // But if user typed "namaste " and suggestion is there, they can press Enter.
-        // Hide after space so next word starts fresh.
-        hide();
+      } else if (e.key === ' ') {
+        if (state.opts.autoConfirmOnSpace) {
+          e.preventDefault();
+          commit(state.selected, true);
+        } else {
+          hide();
+        }
       } else if (/^[1-9]$/.test(e.key)) {
         const idx = parseInt(e.key, 10) - 1;
         if (idx < state.suggestions.length) {
           e.preventDefault();
-          commit(idx);
+          commit(idx, false);
         }
       }
     };

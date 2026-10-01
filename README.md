@@ -4,7 +4,7 @@ Fast, lightweight, and intelligent phonetic Input Method Engine (IME) for the **
 
 Akshar provides universal Roman-to-Devanagari transliteration. One unified phonetic transducer, an orthographic syllable language model, and a shared ranking lexicon cover the entire Devanagari writing system. You type `namaste`, it offers `नमस्ते`.
 
-![CI](https://github.com/sapienskid/akshar-ime/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/Fundaments-Work/akshar-ime/actions/workflows/ci.yml/badge.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
 ---
