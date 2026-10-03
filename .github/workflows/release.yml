@@ -52,7 +52,9 @@ jobs:
           cp packages/engine-wasm/pkg/akshar_ime.d.ts dist/
           cp packages/engine-wasm/pkg/akshar_ime_bg.wasm.d.ts dist/
           cp packages/engine-js/akshar-ime.js dist/
-          tar -czf dist/akshar-ime-wasm.tar.gz -C packages/engine-wasm/pkg . -C ../../packages/engine-js akshar-ime.js
+          # NOTE: tar resolves each -C relative to the previous one, so the
+          # second path is relative to packages/engine-wasm/pkg.
+          tar -czf dist/akshar-ime-wasm.tar.gz -C packages/engine-wasm/pkg . -C ../../engine-js akshar-ime.js
           
           # Native Linux artifacts
           cp target/release/libakshar_ime.so dist/
