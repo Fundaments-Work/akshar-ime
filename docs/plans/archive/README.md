@@ -28,8 +28,14 @@ Read in this order:
 | `devanagari-script-plan.md` | Sep 22 | Devanagari multi-language architecture: shared FST lexicon, position-synchronous search, language conditioning. Completed & landed. |
 | `playground-extension.md` | Sep 22 | Migration plan moving browser playground to standalone repo `Fundaments-Work/akshar-playground`. Completed & landed. |
 
-There are currently no live planning documents — `docs/plans/` holds only this
-archive and the ongoing research agenda (`research-agenda.md`). The live roadmap is `docs/MANUAL.md` §18.
+Live planning documents live in `docs/plans/` (not here):
+
+| Document | Opened | What it plans |
+| :--- | :--- | :--- |
+| `../research-agenda.md` | 2026-09-22 | Ranked accuracy bets with pre-registered kill criteria. |
+| `../browser-extension.md` | 2026-10-03 | Chrome + Firefox MV3 extension; supersedes section B of `playground-extension.md`. Not started. |
+
+The live roadmap is `docs/MANUAL.md` §18.
 
 **Caution: the accuracy figures in these documents are historical.** They were
 measured before the 2026-09-06 defect fixes and do not describe the shipped

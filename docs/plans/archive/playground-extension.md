@@ -4,6 +4,19 @@ Status: playground DONE (shipped to `Fundaments-Work/akshar-playground`,
 private); extension still to build. Training (`train-mid-att`) is running;
 nothing here touches the engine, the model, or any hot path.
 
+> **Superseded in part (2026-10-03).** Section B below is retained as the
+> record of the thinking at the time and is **no longer the live plan** —
+> two of its decisions have since changed. See
+> `docs/plans/browser-extension.md` for the current plan.
+>
+> What changed: (1) the extension moves to a **separate repository**, not
+> `apps/extension/` here; (2) **Firefox is a first-class target**, not a
+> later port. Section B's model-size figures (~9 MB model, ~2 MB wasm) are
+> also stale — the model is 24.4 MB and the wasm pkg 693 KB. Its RHC
+> rationale ("MV3 ... restricts remote WASM") is half right: the wasm must
+> be bundled, but a remotely-fetched *model* counts as data and would have
+> been permitted.
+
 ## Non-negotiable principle
 
 One engine, three shells. `wasm/pkg` + `js/akshar-ime.js` is the single

@@ -2085,9 +2085,10 @@ but it is not currently earning its place.
 The goal is **Devanagari-script accuracy**: one engine that serves every
 language written in Devanagari lipi, judged by a pooled script headline with
 per-language strata underneath — not by tuning to any single language's
-distribution. Delivery surfaces (Cloudflare playground, Chrome extension)
-follow accuracy; they do not lead it. The live work plan is
-`docs/plans/devanagari-script-plan.md`.
+distribution. Delivery surfaces (Cloudflare playground, Chrome and Firefox
+extension) follow accuracy; they do not lead it. The playground
+has shipped (§18); the extension is planned but not started, in
+`docs/plans/browser-extension.md`.
 
 The measured decomposition of the 18.2 missing points on native words:
 
