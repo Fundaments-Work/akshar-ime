@@ -166,15 +166,18 @@ reset-learning:  ## Reset user learned dictionary.
 	@rm -f $${XDG_CONFIG_HOME:-$$HOME/.config}/akshar-devanagari/user_dictionary.bin
 	@echo "User learned dictionary reset."
 
-release-upload:  ## Upload built model artifact to GitHub release (requires TAG=vX.Y.Z).
-	@if [ -z "$(TAG)" ]; then echo "Usage: make release-upload TAG=vX.Y.Z"; exit 1; fi
-	@if [ -f data/akshar.model ]; then \
-		gh release view $(TAG) >/dev/null 2>&1 || gh release create $(TAG) --generate-notes --verify-tag; \
-		gh release upload $(TAG) data/akshar.model --clobber; \
-		echo "Uploaded data/akshar.model to release $(TAG)."; \
-	else \
-		echo "Error: data/akshar.model not found. Run 'make train && make model' first."; exit 1; \
-	fi
+release-upload:  ## Upload locally-built artifacts to an existing release (TAG=v1.2.0).
+	@if [ -z "$(TAG)" ]; then echo "Usage: make release-upload TAG=v1.2.0"; exit 1; fi
+	@missing=0; \
+	for f in data/akshar.model; do \
+		if [ ! -f "$$f" ]; then echo "missing: $$f (run 'make train && make model')"; missing=1; fi; \
+	done; \
+	if [ "$$missing" = "1" ]; then exit 1; fi
+	@echo "Uploading model to release $(TAG)..."
+	@gh release upload $(TAG) data/akshar.model --clobber \
+		|| gh release view $(TAG) >/dev/null 2>&1 \
+		|| gh release create $(TAG) --generate-notes --verify-tag
+	@echo "Verify the release lists akshar.model and akshar-ime-model.bin."
 
 help:  ## Show this help message.
 	@echo "Akshar Devanagari IME"

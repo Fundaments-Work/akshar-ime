@@ -1,5 +1,81 @@
 # Changelog
 
+## 1.2.0 — Nepali-only
+
+The eight-language edition is retired. This release rebuilds the project around
+a single language and re-establishes a reproducible pipeline end to end.
+
+### Scope: Nepali only
+
+- **One language's priors.** The pipeline builds a single-language lexicon from
+  `data/nepali_corpus.txt`; one IBus input source replaces the previous nine;
+  `set_language` now accepts only `nep`/`ne`.
+- **The other seven languages' corpora are gone**, so their frequency tables
+  cannot be rebuilt. Their numbers are retained in `MANUAL.md` §2.3 marked
+  historical rather than deleted, so a citation of an earlier snapshot stays
+  interpretable.
+- **Retiring them cost no Nepali accuracy**: 60.35% top-1 against the retired
+  build's 60.40% on the same 4,101 rows.
+
+### Pipeline
+
+- The pipeline **ran end to end for the first time in this configuration**:
+  `make data-prepare → make lexicon → make train → make model → make eval`.
+  `scripts/fetch-data.sh` and `scripts/data-manifest.tsv` are deleted, so the
+  broken `make data-fetch` target is gone too; the corpus and Aksharantar
+  splits are vendored under `data/` (gitignored).
+- `prepare_pairs` probes both split layouts, restricts to Nepali, and
+  `--assume-source` fills the `source` field the cleaned copies dropped —
+  reporting how many rows it filled rather than assuming silently.
+- `build_lexicon` takes a single `--corpus`; every input now honours the
+  1-in-200 sentence holdout, which the old IndicCorp path did not.
+- Lexicon width raised to **700,000 words** (4.5 MB automaton). Measured against
+  300k on the same rows: **+1.34pp top-1, +0.49pp top-5** for +2.45 MB.
+
+### Measured
+
+`nep_test.json`, 4,101 AK-Freq cases, pooled over common words and named
+entities:
+
+| | 8-language | Nepali-only |
+| :--- | ---: | ---: |
+| top-1 | 60.40% | **60.35%** |
+| top-5 | 77.59% | 76.15% |
+| in-list@8 | — | **78.32%** |
+| reachable@50 | — | **84.00%** |
+| container | 24.44 MB | **9.61 MB** |
+| query latency | 0.794 ms | 0.836 ms |
+
+### Correctness fixes
+
+- **The AK-Freq evaluator measured nothing and exited 0.** It required the
+  `source` field, so every record of the cleaned splits failed to deserialize;
+  it then reported "0 cases" and passed CI. `source` is now optional and an
+  empty case list aborts.
+- **The regression guard was vacuous, then unrepresentative.**
+  `tests/accuracy_regression.rs` read a dataset that does not exist, so it
+  always skipped; retargeted to the vendored split. Its 400-row sample was a
+  *prefix*, and the split is ordered (first half 8.7 codepoints, second half
+  6.4), so the prefix read **82.50%** against a true 60.35%. Now an even
+  stride, measuring 58.75%.
+- **Two prior measurements corrected.** `nep_test.json` is *not* all `AK-Freq` —
+  it holds ~1,993 named entities (`स्वीटजरल्याण्ड`, `ब्रह्मा`, `साइड`), so the
+  78.32% previously quoted as Nepali top-1 was the 2,108-case **native subset
+  only** and was never comparable; pooled, that edition scored 57.25%. And the
+  ≤5 MB artifact budget is *not* impossible — that claim was measured against a
+  flat word array; the automaton's keys are exactly decodable, so 700k words
+  cost 4.5 MB.
+- **D25 (open) — the query normalizer is inert for cold start.**
+  `expand_query_variants` builds up to 6 spellings but `engine.rs` decodes only
+  `variants[0]`, so the expansion only ever feeds the learned trie:
+  `saathi` → `साथी` but `saathee` → `साथिए`.
+
+### Release packaging
+
+- The published release shipped **no model**, so a fresh install fell back to
+  the small built-in default. The model is now uploaded as a release asset and
+  the install path is documented.
+
 ## Unreleased
 
 ### Shared lexicon: compaction, not cross-lingual transfer (measured, 2026-09-22)

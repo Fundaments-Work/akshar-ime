@@ -55,15 +55,27 @@ jobs:
           # NOTE: tar resolves each -C relative to the previous one, so the
           # second path is relative to packages/engine-wasm/pkg.
           tar -czf dist/akshar-ime-wasm.tar.gz -C packages/engine-wasm/pkg . -C ../../engine-js akshar-ime.js
-          
-          # Native Linux artifacts
+
+          # Native Linux artifacts.  aksar.model is NOT here: it is built from
+          # the 1.8 GB corpus, which CI does not have (data/ is gitignored), so
+          # it is attached separately by `make release-upload TAG=<tag>` after
+          # the tag is pushed.  Without it the engine silently falls back to a
+          # small built-in default model.
           cp target/release/libakshar_ime.so dist/
           cp target/release/devanagari-smart dist/
           cp devanagari-smart.xml dist/
-          tar -czf dist/akshar-ime-linux-x86_64.tar.gz -C dist libakshar_ime.so devanagari-smart devanagari-smart.xml
-          
+          cp README.md dist/
+          mkdir -p dist/doc
+          cp docs/MANUAL.md dist/doc/
+          cp -r docs/experiments dist/doc/
+          tar -czf dist/akshar-ime-linux-x86_64.tar.gz -C dist \
+            libakshar_ime.so devanagari-smart devanagari-smart.xml README.md doc
+
           echo "=== Release Artifacts ==="
           ls -lh dist/
+          echo
+          echo "NOTE: akshar.model is uploaded separately after this job completes:"
+          echo "      make release-upload TAG=${{ inputs.tag || github.ref_name }}"
 
       - name: Create / update GitHub Release
         uses: softprops/action-gh-release@v2
