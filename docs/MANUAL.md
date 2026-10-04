@@ -236,13 +236,29 @@ make eval SPLIT=test          # or: make eval-session
 | :--- | ---: |
 | top-1, cold (`nep_test.json`, 4,101 cases) | **60.35%** |
 | top-3 | 73.15% |
-| in-list@8 | **78.32%** |
-| MRR | 0.672 |
 | top-5 (`evaluate_aksharantar`) | 76.15% |
+| in-list@8 | **78.32%** |
+| **reachable@50** | **84.00%** |
+| MRR | 0.672 |
 | lenient top-1 / in-list@8 | 61.59% / 79.08% |
 | mean length-matched top-1 | 61.59% |
 | query latency | 0.836 ms |
 | container size | 9.61 MB |
+
+`reachable@50` is the operative ceiling: **top-1 cannot exceed 84.00% without
+changing candidate generation.** That splits the remaining error into two very
+unequal prizes —
+
+| Band | Share |
+| :--- | ---: |
+| gold in top-8 | 78.32% |
+| gold in top-50 but not top-8 (ranking) | 5.68% |
+| **gold never surfaced at 50 candidates (generation)** | **16.00%** |
+
+— of which **23.65pp is pure ranking headroom** (top-1 → reachable@50). That
+headroom is the larger prize, costs nothing in artifact size to attack, and is
+addressable by the factored matra term rather than by a new index
+(`docs/experiments/2026-10-04-canonical-key-retrieval-ceiling.md` §8).
 
 **These figures are pooled over native words *and* named entities.** The cleaned
 Aksharantar splits dropped the `source` field, so the stratification is
@@ -262,8 +278,12 @@ rows, same harness (`evaluate_aksharantar`):
 
 So retiring the other seven languages cost ~nothing in top-1 and about 1.4pp of
 top-5, bought a 2.5x smaller container, and cost 0.04 ms of latency for the
-wider single-language lexicon. The top-5 loss is small but real and unexplained;
-it is not yet attributed.
+wider single-language lexicon. **The top-5 loss is still unattributed.** Lexicon
+width has been excluded as the cause: at 300k words top-5 is *worse*
+(75.66%), so the wider lexicon helps rather than hurts (§8 of the experiment
+log). Remaining candidates are the trigram pruning threshold, the blend weight
+`gamma` calibrated on a Nepali-only validation split, and the reranker having
+trained on 500k Nepali-only pairs rather than a mixed-language pool.
 
 The historical **78.32%** in this section's earlier revision was `native` top-1
 on the **2,108-case native subset only**, excluding the 1,993 entity cases

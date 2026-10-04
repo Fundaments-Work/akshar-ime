@@ -245,27 +245,85 @@ exactly MANUAL's standing open limitation. This is a hypothesis, not a result.
 
 ---
 
-## 8. What is not yet measured
+## 8. Lexicon-width attribution (D2 verified)
 
-- Whether the union's in-list@8 exceeds **78.32%**, which is what would give the
-  new scorer room to beat 60.35%. This is the single most important open number.
+D2 ("widen to 700k") was the least-verified decision in this log, so it was
+measured directly: the same training recipe (`--reranker-pairs 500000
+--epochs 5 --iterations 12`) at two lexicon widths, scored on the same 4,101
+rows with the same harnesses.
+
+| | 300k words | 700k words | Δ |
+| :--- | ---: | ---: | ---: |
+| lexicon | 1.92 MB | 4.49 MB | +2.57 MB |
+| container | 7.16 MB | 9.61 MB | +2.45 MB |
+| top-1 | 59.01% | **60.35%** | **+1.34pp** |
+| top-3 | 72.28% | 73.15% | +0.87pp |
+| top-5 | 75.66% | 76.15% | +0.49pp |
+| in-list@8 | 77.88% | 78.32% | +0.44pp |
+| reachable@50 | 83.86% | 84.00% | +0.14pp |
+| MRR | 0.662 | 0.672 | +0.010 |
+
+**D2 confirmed**: the wider lexicon is better on every metric, at 2.45 MB. The
++1.34pp top-1 for +2.45 MB is a good trade and the lexicon is now 47% of the
+container.
+
+It also **rules out** the lexicon as the cause of the −1.44pp top-5 regression
+against the retired eight-language artifact (§0): 300k is *worse* on top-5, so
+narrowing the lexicon does not recover it. That regression remains unattributed;
+the surviving candidates are the trigram pruning threshold, the blend weight
+`gamma` calibrated on a Nepali-only validation split, and the reranker having
+trained on 500k Nepali-only pairs rather than a mixed-language pool.
+
+### The number that sets the ceiling
+
+`reachable@50 = 84.00%`. So for the current generator:
+
+| Band | Share |
+| :--- | ---: |
+| gold in top-8 (in-list@8) | 78.32% |
+| gold in top-50 but not top-8 | 5.68% |
+| **gold never surfaced at all** | **16.00%** |
+
+Two consequences, and they reprioritise the work:
+
+1. **Ranking headroom is 23.65pp** (60.35% → 84.00%), which is larger than the
+   retrieval gap and costs nothing in size to attack. That is the factored
+   matra term (D5), not a new index.
+2. **Top-1 cannot exceed 84.00%** without changing candidate generation. The
+   specification's 82.5%/84% gate sits exactly at this ceiling, so it is only
+   reachable if generation improves *and* ranking becomes near-perfect.
+
+## 9. What is not yet measured
+
+- **Why top-5 is 1.44pp below the retired eight-language artifact.** Lexicon
+  width is now excluded (§8). Remaining candidates: trigram pruning threshold,
+  the blend weight `gamma` calibrated on a Nepali-only validation split, and the
+  reranker having trained on 500k Nepali-only pairs rather than a mixed pool.
+- Whether the union's in-list@8 exceeds **78.32%**. Still the single most
+  important open number for retrieval work.
 - Whether the log-linear scorer beats the `u64` bands in practice. MANUAL §16
   records that the learned reranker alone peaks at γ≈0.2–0.3 for **+0.28pp**, so
   this is genuinely open and should not be assumed.
-- Latency of the union against the ≤0.85 ms p99 target. The historical decoder
-  measured 0.79 ms *mean*; p99 was not recorded.
-- Whether widening the lexicon to 700k actually reduced the 36.24% absence
-  figure — assumed, not yet measured (see next step 3).
+- Latency of the union against the ≤0.85 ms target. The current model measures
+  0.836 ms/query mean; p99 has not been recorded.
+- Whether `--reranker-pairs 0` (all 2.4M) helps. MANUAL's null result was
+  measured on the eight-language mix, where 500k pairs gave Nepali only ~62k
+  reranker examples; the pool is now Nepali-only, so the null does not transfer
+  and is worth ~10 min to settle.
 
-## 9. Next steps
+## 10. Next steps
 
 1. ~~Establish the Nepali-only baseline.~~ **Done** — 60.35% top-1, 78.32%
    in-list@8 (§0).
 2. ~~Re-measure on the rebuilt container.~~ **Done**, same step.
-3. **Re-run §4/E5's coverage analysis against the 700k lexicon now in
-   `data/lexicon.bin`**, to confirm D2 actually moved the 36.24% figure. D2 is
-   currently the least-verified decision in this log.
-4. Build the derived-φ tool; gate it on measured key-match per level.
-5. Build the collapsed-key index + SymSpell as a *third* source beside the two
-   existing ones; A/B **in-list@8** before touching the scorer.
-6. Only then replace the `u64` bands with the unified objective (D5 with it).
+3. ~~Confirm D2 (lexicon width).~~ **Done** (§8): 700k beats 300k on every
+   metric, +1.34pp top-1 for +2.45 MB.
+4. **Attributed ranking first, not retrieval.** The 23.65pp gap between top-1
+   (60.35%) and reachable@50 (84.00%) is the larger prize and costs no size.
+   Build the akshara-factored matra term (D5) and log-linear fusion (D5), and
+   measure against top-1 *and* top-5.
+5. Build the derived-φ tool; gate it on measured key-match per level.
+6. Build the collapsed-key index + SymSpell as a *third* source beside the two
+   existing ones; A/B **in-list@8** before touching the scorer. Only worth doing
+   once 1–3 are exhausted, because it adds ~1–2 MB and ~0.05–0.1 ms.
+7. Settle `--reranker-pairs 0` (~10 min) whenever convenient.
