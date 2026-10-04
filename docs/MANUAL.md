@@ -234,19 +234,42 @@ make eval SPLIT=test          # or: make eval-session
 
 | Metric | Value |
 | :--- | ---: |
-| AK-Freq top-1, cold (`nep_test.json`, 4,101 cases) | **60.35%** |
-| AK-Freq top-3 | 73.15% |
-| AK-Freq in-list@8 | **78.32%** |
-| AK-Freq MRR | 0.672 |
+| top-1, cold (`nep_test.json`, 4,101 cases) | **60.35%** |
+| top-3 | 73.15% |
+| in-list@8 | **78.32%** |
+| MRR | 0.672 |
+| top-5 (`evaluate_aksharantar`) | 76.15% |
 | lenient top-1 / in-list@8 | 61.59% / 79.08% |
 | mean length-matched top-1 | 61.59% |
+| query latency | 0.836 ms |
 | container size | 9.61 MB |
 
-The historical eight-language artifact measured **60.40%** top-1 on the same
-split, so the Nepali-only rebuild reproduces the baseline to within 0.05pp —
-i.e. retiring the other seven languages cost no Nepali accuracy. That
-equivalence is the result worth having: it establishes that the 60.35% figure
-below is a clean baseline to beat, not a regression.
+**These figures are pooled over native words *and* named entities.** The cleaned
+Aksharantar splits dropped the `source` field, so the stratification is
+unrecoverable; `prepare_pairs --assume-source AK-Freq` supplies a placeholder
+label so rows can be grouped, and the entity stratum reads empty as a result
+(§12.1). Do not compare these numbers to a native-only figure.
+
+Like-for-like against the retired eight-language artifact on the *same* 4,101
+rows, same harness (`evaluate_aksharantar`):
+
+| | 8-language | Nepali-only | Δ |
+| :--- | ---: | ---: | ---: |
+| top-1 | 60.40% | 60.35% | **−0.05pp** |
+| top-5 | 77.59% | 76.15% | **−1.44pp** |
+| container | 24.44 MB | 9.61 MB | **−60.7%** |
+| query latency | 0.794 ms | 0.836 ms | +0.042 ms |
+
+So retiring the other seven languages cost ~nothing in top-1 and about 1.4pp of
+top-5, bought a 2.5x smaller container, and cost 0.04 ms of latency for the
+wider single-language lexicon. The top-5 loss is small but real and unexplained;
+it is not yet attributed.
+
+The historical **78.32%** in this section's earlier revision was `native` top-1
+on the **2,108-case native subset only**, excluding the 1,993 entity cases
+(34.97%). Pooled, that edition scored **57.25%** on all 4,101. The 78.32%
+cannot be reproduced from the vendored data, and the two figures were never
+comparable — a correction to an earlier claim in this manual.
 
 Two structural facts about this benchmark drive the current work. Both are
 measured in `docs/experiments/2026-10-04-canonical-key-retrieval-ceiling.md`
@@ -1348,11 +1371,14 @@ partitions it the same three ways the original single-language harness did:
 
 The vendored Nepali splits were cleaned down to `english word` / `native word`
 only, so `source` is absent and `prepare_pairs` is run with
-`--assume-source AK-Freq`; the whole `nep_test.json` split is AK-Freq, so the
-stratum is correct rather than assumed. The tool reports how many rows it
-filled in. Native strata are the headline metric because they measure the
-intended task. Entity accuracy is reported alongside, in full (§2.3), never
-pooled into one "accuracy" without saying so.
+`--assume-source AK-Freq`. That label is a **placeholder, not a fact**: the
+split is 2,108 native words plus 1,993 named entities, and the entity cases are
+plainly still there (`स्वीटजरल्याण्ड`, `प्यालेस्टाइनले`, `ब्रह्मा`, `साइड`).
+The tool reports how many rows it filled in. **Consequence: any figure measured
+on this split is pooled across both strata, and the entity stratum reads empty
+only because it was relabelled.** Native strata are the headline metric
+because they measure the intended task, so a pooled number must always say so
+(§2.3).
 
 **The lexicon's frequency text** is a separate, smaller source: the same
 Nepali corpus, counted with a `count >= 2` floor and capped by `--max-words`

@@ -10,7 +10,7 @@ Rust crate `akshar_ime` (lib entry `src/lib.rs`, public API `ImeEngine::get_sugg
 - `make check` — **required gate**: `cargo fmt --check` + `cargo clippy --release --all-targets -- -D warnings` + `cargo test --release` + `check-wasm`. Native-green does not imply wasm-green, so `make check-wasm` is not optional. Needs `rustup target add wasm32-unknown-unknown`.
 - `make eval [SPLIT=valid|test] [K=8]` — runs the Nepali benchmark (`eval_langs` over `data/pairs/$(SPLIT).jsonl`). `make eval-session` measures cold vs. adaptive-learning session accuracy.
 - `make train [PAIRS=500000] [EPOCHS=5]` — trains the engine. Writes `data/akshar.model` directly. `make model` (= `calibrate` then `promote`) calibrates blend weights and fits the size budget.
-- `make data-prepare [ASSUME_SOURCE=AK-Freq]` → `make lexicon [LEXICON_ARGS="--max-words 700000"]` → `make train` → `make model` is the full from-scratch sequence; each step is idempotent and independently re-runnable. Verified end-to-end at `--smoke` scale (`cargo run --release --bin train -- --smoke`, ~6s). **There is no `data-fetch` step** — the corpus and Aksharantar splits are vendored under `data/` (see `data/README.md`).
+- `make data-prepare [ASSUME_SOURCE=AK-Freq]` → `make lexicon [LEXICON_ARGS="--max-words 700000"]` → `make train` → `make model` is the full from-scratch sequence; `ASSUME_SOURCE` is a **placeholder label only** — the cleaned splits dropped `source`, so the native/entity split is unrecoverable and every figure on `test.jsonl` is pooled across both. Each step is idempotent and independently re-runnable. Verified end-to-end at `--smoke` scale (`cargo run --release --bin train -- --smoke`, ~6s). **There is no `data-fetch` step** — the corpus and Aksharantar splits are vendored under `data/` (see `data/README.md`).
 - `make wasm` — builds the WebAssembly package via `packages/engine-wasm/build.sh`.
 - IBus deploy: `sudo make install` then `make restart-ibus` **without sudo**. CI needs `libibus-1.0-dev libjansson-dev` and runs `make release`.
 
@@ -31,7 +31,7 @@ Rust crate `akshar_ime` (lib entry `src/lib.rs`, public API `ImeEngine::get_sugg
 
 Scoped in `docs/experiments/2026-10-04-canonical-key-retrieval-ceiling.md`. Read it before touching retrieval or scoring.
 
-- Baseline is established and re-measured on the Nepali-only pipeline: **60.35% top-1, 78.32% in-list@8** (AK-Freq Nepali, 4,101 cases, 9.61 MB container). Retiring the other seven languages cost 0.05pp.
+- Baseline is established and re-measured on the Nepali-only pipeline: **60.35% top-1, 76.15% top-5, 78.32% in-list@8**, 0.836 ms, 9.61 MB container — all figures **pooled over native words and named entities**, on the same 4,101 rows where the old 8-language artifact gave 60.40% / 77.59% / 24.44 MB / 0.794 ms. The old "78.32% native" was the 2,108-case native subset and is not comparable.
 - **21.68% of queries never surface the gold word at all.** Rescoring cannot fix those; only candidate generation can. Judge retrieval work on in-list@8, not top-1.
 - **D25 (open):** the normalizer expands up to 6 query variants but `engine.rs` decodes only `variants[0]`, so the expansion is inert for cold start. `saathee`→`साथिए` while `saathi`→`साथी`. Most likely resolved for free by folding vowel-length equivalence into the tier table's deviation term.
 - The collapsed-key inverted index measures a **49.18%** retrieval ceiling (82.5% gate; shipped decoder is 60.35% top-1), so it is added **alongside** the lattice decode, never instead of it.

@@ -25,7 +25,12 @@ struct Record<'a> {
     roman: &'a str,
     #[serde(rename = "native word")]
     target: &'a str,
-    source: &'a str,
+    /// Absent in the cleaned vendored splits (data/README.md); required
+    /// upstream.  Optional so a missing field degrades to one unlabelled
+    /// bucket instead of failing every record -- previously this made the
+    /// harness silently evaluate 0 cases and still exit 0.
+    #[serde(default)]
+    source: Option<&'a str>,
 }
 
 #[derive(Debug, Clone)]
@@ -129,6 +134,14 @@ fn main() {
     }
 
     let cases = load_cases(&dataset_path);
+    // A benchmark that scores nothing and exits 0 is worse than one that fails:
+    // it reports success in CI while measuring nothing.  Every record failing to
+    // deserialise used to land here silently.
+    assert!(
+        !cases.is_empty(),
+        "no usable cases in {dataset_path} (each line needs \"english word\" and \
+         \"native word\")"
+    );
 
     let engine = if let Some(ref mp) = model_path {
         ImeEngine::from_unified_file(std::path::Path::new(mp)).expect("load model from --model")
@@ -181,7 +194,7 @@ fn load_cases(path: &str) -> Vec<EvalCase> {
         cases.push(EvalCase {
             roman,
             target,
-            source: rec.source.to_string(),
+            source: rec.source.unwrap_or("unlabelled").to_string(),
         });
     }
     cases

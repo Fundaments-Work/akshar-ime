@@ -87,18 +87,25 @@ while preserving 100% of the pairs.
   neural mining model; meaningful only for that model, not for a
   rule/lexicon-based engine.
 
-**Consequence, and it is load-bearing.** The whole `nep_test.json` split is
-`AK-Freq`, so `prepare_pairs` is invoked with `--assume-source AK-Freq` to
-restore the `source` field that `eval_langs` uses to assign a stratum. The
-tool reports how many rows it filled in rather than assuming silently:
+**Consequence, and it is a real limitation.** The cleaned splits carry no
+`source`, so the **native-word / named-entity stratification is
+unrecoverable**. The split is *not* all `AK-Freq`: it holds 4,101 cases of
+which the pre-cleaning pipeline measured 2,108 native words and 1,993 named
+entities, and entity cases are plainly present (`स्वीटजरल्याण्ड`,
+`प्यालेस्टाइनले`, `ब्रह्मा`, `साइड`, `दिसम्बरमा`). `prepare_pairs` therefore
+takes `--assume-source AK-Freq` purely so `eval_langs` has a bucket to group
+rows into; it is a **placeholder label, not a claim about the data**, and it
+makes the entity stratum read as empty. The tool reports how many rows it
+filled rather than assuming silently:
 
 ```
 source field absent on 2404319 rows (train 2397414, valid+test 6905); assumed "AK-Freq".
 ```
 
-Only the Nepali split is vendored. Upstream publishes eight Devanagari
-languages, but the engine ships Nepali-only priors, so no other split is
-fetched or trained on.
+Consequence for headline numbers: any figure measured on this 4,101-case split
+is **pooled over native words and named entities**. The retired eight-language
+edition's `nep` native-only top-1 of 78.32% was measured on the 2,108-case
+native subset alone and **cannot be reproduced** from the vendored data.
 
 ---
 
