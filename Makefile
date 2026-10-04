@@ -24,7 +24,7 @@ DESKTOP_TRIGRAM_THRESHOLD ?= 3e-2
 
 .PHONY: all release debug test check check-native check-wasm \
         install uninstall reinstall restart-ibus \
-        data-fetch data-prepare lexicon train calibrate promote model eval \
+        data-prepare lexicon train calibrate promote model eval eval-session \
         wasm wasm-clean clean reset-learning release-upload help
 
 # --- Build Targets ---
@@ -113,19 +113,14 @@ reinstall: uninstall install  ## Reinstall the engine.
 
 # --- Data Pipeline & Training ---
 
-data-fetch:  ## Download and verify pinned Devanagari datasets (SET=... NAME=... optional).
-	@bash scripts/fetch-data.sh $(SET) $(NAME)
+data-prepare:  ## Build Nepali word-pair splits: data/pairs/{train,valid,test}.jsonl.
+	@cargo run --release --bin prepare_pairs -- $(if $(RAW),--raw $(RAW),) \
+		$(if $(ASSUME_SOURCE),--assume-source $(ASSUME_SOURCE),)
 
-data-prepare:  ## Build normalized pairs: data/pairs/{train,valid,test}.jsonl.
-	@for z in data/raw/aksharantar/*.zip; do \
-		[ -f "$$z" ] || continue; \
-		l=$$(basename $$z .zip); mkdir -p data/raw/aksharantar/$$l; \
-		unzip -o -q -j $$z -d data/raw/aksharantar/$$l; \
-	done
-	@cargo run --release --bin prepare_pairs
-
-lexicon:  ## Build universal Devanagari FST lexicon (data/lexicon.bin).
-	@cargo run --release --bin build_lexicon
+lexicon:  ## Build the Nepali lexicon automaton (data/lexicon.bin).
+	@cargo run --release --bin build_lexicon -- $(if $(CORPUS),--corpus $(CORPUS),) \
+		$(LEXICON_ARGS)
+	@ls -lh data/lexicon.bin
 
 PAIRS ?= 500000
 EPOCHS ?= 5
@@ -146,9 +141,12 @@ model: calibrate promote  ## Calibrate and prune trained model in data/akshar.mo
 # --- Evaluation ---
 
 SPLIT ?= test
-eval:  ## Evaluate Devanagari benchmark on data/pairs/$(SPLIT).jsonl (SPLIT=valid|test).
+eval:  ## Evaluate the Nepali benchmark on data/pairs/$(SPLIT).jsonl (SPLIT=valid|test).
 	@cargo run --release --bin eval_langs -- --dataset data/pairs/$(SPLIT).jsonl \
-		$(if $(MODEL),--model $(MODEL),) $(if $(JSON),--json $(JSON),)
+		$(if $(MODEL),--model $(MODEL),) $(if $(K),--k $(K),) $(if $(JSON),--json $(JSON),)
+
+eval-session:  ## Cold vs. adaptive-learning session accuracy on held-out sentences.
+	@cargo run --release --bin eval_session -- $(if $(MODEL),--model $(MODEL),)
 
 # --- WebAssembly ---
 

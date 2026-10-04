@@ -118,12 +118,7 @@ fn clean_devanagari_token(word: &str) -> Option<String> {
 }
 
 fn auto_detect_pairs() -> Option<PathBuf> {
-    let candidates = [
-        "data/pairs/train.jsonl",
-        "data/aksharantar/train_devanagari.jsonl",
-        "data/aksharantar/nep_train.json",
-        "data/corpus_clean.json",
-    ];
+    let candidates = ["data/pairs/train.jsonl", "data/aksharantar/nep_train.json"];
     for c in candidates {
         let p = PathBuf::from(c);
         if p.exists() {
@@ -134,7 +129,7 @@ fn auto_detect_pairs() -> Option<PathBuf> {
 }
 
 fn auto_detect_text() -> Option<PathBuf> {
-    let candidates = ["data/store/corpus_clean.txt", "data/raw/corpus.txt"];
+    let candidates = ["data/nepali_corpus.txt"];
     for c in candidates {
         let p = PathBuf::from(c);
         if p.exists() {

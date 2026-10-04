@@ -76,13 +76,16 @@ make test            # unit + integration tests, including the accuracy guard
 after a code change without repeating the ones before it):
 
 ```sh
-make data-fetch SET=aksharantar             # ~229 MB, pinned + SHA-256 verified
-make data-fetch SET=indiccorp-v2-sample     # ~300 MB/language, same
-make data-prepare                           # -> data/pairs/{train,valid,test}.jsonl
-make lexicon                                # -> data/lexicon.bin (§8.6)
-make train-full                             # ~4h; train-mid (~40min) for a faster, weaker check
-make model                                  # calibrate blend + fit the size budget -> data/akshar.model
+make data-prepare ASSUME_SOURCE=AK-Freq   # -> data/pairs/{train,valid,test}.jsonl
+make lexicon                               # -> data/lexicon.bin (§8.6)
+make train                                 # -> data/akshar.model
+make model                                 # calibrate blend + fit the size budget
 ```
+
+There is no `data-fetch` step: the corpus and the Aksharantar splits are
+vendored under `data/` and `data/` is gitignored, so a fresh clone needs the
+two files placed there before the pipeline runs (see `data/README.md` for
+provenance, sizes and checksums).
 
 `train`/`train-full`/`train-mid` auto-detect the multi-language pairs and
 lexicon above over the single-language predecessor if present (whichever
@@ -120,16 +123,23 @@ Component ablations are switched at runtime; see §13.1.
 Akshar is an input method engine that converts Roman-script typing into
 Devanagari. You type `namaste` and it offers `नमस्ते`.
 
-It is explicitly **multi-language**, not script-generic with one language's
-priors leaking through a "language-agnostic" label. One phonetic engine
-(akshara units, script-wide emissions) is shared by eight Devanagari
-languages — Hindi, Marathi, Nepali, Sanskrit, Konkani, Maithili, Bodo, Dogri
-— and a language tag conditions ranking explicitly (§8.6, `LangCond`) rather
-than being absent from the pipeline. Earlier revisions of this manual
-described the engine as language-agnostic; that was true of the phonetics but
-concealed a single Nepali-only frequency vocabulary underneath, which capped
-every other language's accuracy regardless of the phonetics (§17.1 logs the
-correction rather than quietly dropping the old claim).
+It is explicitly **Nepali**. The phonetic core remains script-general (akshara
+units, script-wide emissions), but the shipped priors, vocabulary and
+evaluation are Nepali-only: one running-text corpus, one Aksharantar split,
+one lexicon automaton. A language tag remains in the pipeline (`LangCond`,
+§8.6) and still conditions ranking, but it can only ever select Nepali, so it
+is a formality rather than a feature.
+
+Earlier revisions of this manual described the engine as multi-language across
+eight Devanagari languages, and one as language-agnostic. Both are
+superseded. The multi-language edition was retired when its per-language
+running-text inputs were dropped: only the Nepali corpus and the Nepali
+Aksharantar split are vendored, so the other seven languages' frequency tables
+could not be rebuilt and their numbers are no longer reproducible. Those
+figures are retained below, marked as historical, so that a publication citing
+an earlier snapshot of this system does not have to guess which claim changed —
+the same convention this manual already follows for other retractions
+(§17.1, and the struck-through bullets in §17).
 
 Three other properties define the design:
 
@@ -142,16 +152,16 @@ standard library plus maintained crates (`serde`, `unicode-normalization`,
 `rand_chacha` and `unicode-segmentation` (evaluation harness) and `criterion`
 (benchmarks).
 
-**Small enough to ship in a web page.** The desktop container is 24.44 MB for
-all eight languages (one shared automaton, not eight separate models — §8.6);
-the browser profile is 23.30 MB raw and 13.97 MB Brotli-compressed.
+**Small enough to ship in a web page.** The desktop container measured
+24.44 MB in the retired eight-language edition (§2.3, historical). The
+Nepali-only container is smaller and is re-measured by `make model`; the
+Nepali-only lexicon automaton alone is 1.92 MB for 300k words.
 
-**Fast enough to run on every keystroke.** A suggestion query costs
-**1.16 ms** end to end on a desktop CPU with a beam width of 32 (§14) —
-slower in absolute terms than the single-language, dictionary-free predecessor
-(0.63–0.82 ms), because every query now also walks a shared dictionary
-automaton across eight languages' vocabularies; still three orders of
-magnitude under any perceptible-lag threshold.
+**Fast enough to run on every keystroke.** A suggestion query cost **1.16 ms**
+end to end on a desktop CPU with a beam width of 32 in the eight-language
+edition (§14, historical), of which 0.375 ms was the shared multi-language
+dictionary walk that the Nepali-only edition no longer performs. Three orders
+of magnitude under any perceptible-lag threshold.
 
 ## Contribution and prior art
 
@@ -210,16 +220,64 @@ what a *returning* user experiences by a wide margin (§12.10).
 
 ## Measured performance
 
+### Nepali (current)
+
+Measured on the Nepali-only container (`data/akshar.model`, 9.61 MB after
+pruning), 2026-10-04. Reproduce with:
+
+```sh
+make data-prepare ASSUME_SOURCE=AK-Freq
+make lexicon LEXICON_ARGS="--max-words 700000"
+make train && make model
+make eval SPLIT=test          # or: make eval-session
+```
+
+| Metric | Value |
+| :--- | ---: |
+| AK-Freq top-1, cold (`nep_test.json`, 4,101 cases) | **60.35%** |
+| AK-Freq top-3 | 73.15% |
+| AK-Freq in-list@8 | **78.32%** |
+| AK-Freq MRR | 0.672 |
+| lenient top-1 / in-list@8 | 61.59% / 79.08% |
+| mean length-matched top-1 | 61.59% |
+| container size | 9.61 MB |
+
+The historical eight-language artifact measured **60.40%** top-1 on the same
+split, so the Nepali-only rebuild reproduces the baseline to within 0.05pp —
+i.e. retiring the other seven languages cost no Nepali accuracy. That
+equivalence is the result worth having: it establishes that the 60.35% figure
+below is a clean baseline to beat, not a regression.
+
+Two structural facts about this benchmark drive the current work. Both are
+measured in `docs/experiments/2026-10-04-canonical-key-retrieval-ceiling.md`
+and summarised in §17.2:
+
+- **Retrieval, not ranking, is the binding constraint on AK-Freq.** The shipped
+  in-list@8 is 78.32%, so 21.68% of queries do not surface the gold word at all
+  and no amount of rescoring can recover them. A collapsed-key inverted index
+  over a 300k-word lexicon retrieves the gold word for only **49.18%** of those
+  4,101 cases, because 36.24% of gold words are absent from such a lexicon and
+  the residual key mismatches are systematic phonological shifts
+  (`action` → `एक्शन`) rather than typos, which edit distance cannot bridge.
+  Hence candidate generation unions the key index with the lattice decode rather
+  than replacing it.
+- **Ranking ties are the binding constraint on native words.** 75.9% of the
+  remaining errors are in-beam ties that global count features cannot resolve,
+  which is why §17.2's log-linear scorer is paired with a factored matra term
+  rather than replacing the reranker outright.
+
+### Eight languages (retired, retained for citation stability)
+
 On the held-out multi-language test split (34,011 native-word cases + 14,266
-named-entity cases across all eight languages, `data/pairs/test.jsonl` built
-by `make data-prepare` — §12.1), measured on `data/akshar.model`,
-language-aware (`--lang-aware`, `make eval-langs`):
+named-entity cases across eight languages, `data/pairs/test.jsonl` built by
+`make data-prepare` — §12.1), measured on the retired eight-language
+`data/akshar.model`, language-aware (`--lang-aware`):
 
 | Lang | native $n$ | native top-1 | in-list@8 | entity $n$ | entity top-1 | IndicXlit AK-Freq top-1 (plain / +word LM) |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: |
 | Hindi (`hin`) | 8,098 | 53.42% | 81.45% | 2,014 | 43.59% | 58.6 / 67.9 |
 | Marathi (`mar`) | 10,112 | 66.78% | 83.79% | 2,078 | 37.15% | 74.7 / 85.5 |
-| Nepali (`nep`) | 2,108 | 78.32% | 92.55% | 1,993 | 34.97% | 80.2 / 86.6 |
+| **Nepali (`nep`)** | 2,108 | **78.32%** | **92.55%** | 1,993 | 34.97% | 80.2 / 86.6 |
 | Sanskrit (`san`) | 2,927 | 75.30% | 92.07% | 2,375 | 18.48% | 81.6 / 90.1 |
 | Konkani (`kok`) | 3,051 | 56.24% | 79.15% | 1,991 | 30.94% | 65.4 / 76.3 |
 | Maithili (`mai`) | 3,471 | 69.12% | 90.98% | 1,978 | 38.78% | 78.7 / 87.6 |
@@ -228,29 +286,17 @@ language-aware (`--lang-aware`, `make eval-langs`):
 | **macro** | | **59.21%** | 78.85% | | **31.76%** | |
 | **pooled** | 34,011 | **60.69%** | 81.27% | 14,266 | **31.59%** | |
 
-Lenient scoring (nukta-optional, chandrabindu/anusvara, nasal-cluster/anusvara
-equivalence — §12.2) adds +2.27pp pooled native top-1 (62.96%) and +1.14pp
-pooled in-list (82.41%).
+Every row except Nepali is **no longer reproducible**: those languages'
+running-text inputs are no longer vendored, so their frequency tables cannot
+be rebuilt (§2, "What this system is"). The IndicXlit column is the paper's
+own reported numbers ([Madhani et al. 2023], Table 13), never re-measured here.
 
-For reference, **IndicXlit** (AI4Bharat, an ~11M-parameter transformer trained
-on the full 26M-pair Aksharantar corpus) reports the AK-Freq column above
-without LM reranking, and with its word-unigram rerank alongside it
-([Madhani et al. 2023], Table 13). Neither IndicXlit figure is re-measured
-here; both are the paper's own numbers, reproduced as a reference column, not
-a head-to-head run under identical conditions.
-
-This is the cold, uniformly-weighted number: every distinct word counted once,
-no memory between queries. §12.10 measures the same model under realistic,
-frequency-weighted, learning-enabled use and finds pooled top-1 rises to
-**97.28%** — the gap is the subject of that section, not a contradiction of
-the table above.
-
-| Resource | Desktop | Browser |
-| :--- | ---: | ---: |
-| Container size | 24.44 MB | 23.30 MB |
-| Brotli-compressed | not applicable (native binary) | 13.97 MB |
-| Query latency | 1.16 ms end to end ($k=8$, beam 32 — §14) | not re-measured on this artifact |
-| Cold start | not re-measured on this artifact | not re-measured |
+| Resource | Eight-language edition (historical) |
+| :--- | ---: |
+| Container size | 24.44 MB |
+| Brotli-compressed (browser profile) | 13.97 MB |
+| Query latency | 1.16 ms end to end ($k=8$, beam 32 — §14) |
+| Nepali-only lexicon automaton | 4.49 MB (700k words) |
 
 \newpage
 
@@ -892,10 +938,10 @@ $$
 clamped to $[1, 255]$, with $0$ reserved for "this language does not use this
 word." Eighth-octave steps ($2^{1/8} \approx 9\%$) are finer than corpus
 sampling noise, so nothing is lost to the quantisation. Built by
-`build_lexicon` from an IndicCorp v2 sample per language (§12.1), capped to
-the 300,000 most frequent words per language above a floor of 2 occurrences
---- both to bound automaton size and because words rarer than that are noise
-relative to what an 86M--sample-scale corpus can resolve. Same automaton is
+`build_lexicon` from the Nepali running-text corpus (§12.1), capped to the
+700,000 most frequent words above a floor of 2 occurrences --- both to bound
+automaton size and because words rarer than that are noise relative to what a
+105M-token corpus can resolve. Same automaton is
 consulted twice: `Lexicon::level`/`count` for the frequency features above,
 and, via the `Dictionary` impl in `decoder.rs` (§7.3), as the dictionary the
 second decode pass is constrained to. One artefact does both jobs a
@@ -943,6 +989,14 @@ valid Devanagari renderings, and only usage frequency disambiguates them.
 
 ## Does the shared automaton transfer, or just compact? (ablation)
 
+> **Historical.** This ablation asked whether one automaton over eight
+> languages would transfer to a low-resource one. The engine is Nepali-only
+> now, so the question is moot and the experiment is not reproducible: the
+> Bodo and Dogri corpora it depends on are no longer vendored. Retained
+> because the *structural* half of the finding still constrains the code —
+> `LexiconDict::is_word` still consults a single automaton, so a future
+> second language would inherit the same behaviour.
+
 One automaton for eight languages could help a low-resource language two
 structurally different ways, and it is worth being precise about which one
 this system actually gets, because only one of them is true.
@@ -963,9 +1017,9 @@ is a real code path, not a hypothesis, and it is the one place cross-lingual
 transfer could actually happen in this architecture.
 
 **Measured, whether it does**: built an isolated lexicon from only Bodo and
-Dogri's IndicCorp text (`build_lexicon --raw <bd+dg-only dir>`, no other
-language present at all: 70,122 words, 0.50 MB against the full lexicon's
-share of the two), swapped it into a copy of `data/akshar.model` in place of
+Dogri's own corpus text (no other language present at all: 70,122 words,
+0.50 MB against the full lexicon's share of the two), swapped it into a copy
+of `data/akshar.model` in place of
 the shared one (`examples/swap_lexicon.rs`, EM/LM/reranker weights
 byte-identical), and ran `eval_langs --langs brx,doi --lang-aware --ceiling
 50` on both:
@@ -1272,31 +1326,19 @@ run (§17.1, D19).
 
 | Split | Pairs | Use |
 | :--- | ---: | :--- |
-| `train.jsonl` | 7,308,261 | EM, language model, reranker, all 8 languages |
-| `valid.jsonl` | 30,565 | reranker holdout, blend calibration (`calibrate_blend`) |
-| `test.jsonl` | 48,277 | **all multi-language accuracy in this manual** |
+| `train.jsonl` | 2,397,403 | EM, language model, reranker (Nepali) |
+| `valid.jsonl` | 2,804 | reranker holdout, blend calibration (`calibrate_blend`) |
+| `test.jsonl` | 4,101 | **all Nepali accuracy in this manual** (the AK-Freq split) |
 
-Per-language pair counts are not uniform --- this matters for reading §2.3
-and §12.8 correctly, because a language with little clean training text has a
-lower *generation* ceiling, not just a harder ranking problem:
+The eight-language edition of this pipeline emitted 7,308,261 / 30,565 /
+48,277 rows over eight languages; those figures are historical (§2.3) and the
+per-language breakdown is gone with the inputs. Nepali alone is large enough
+that the generation ceiling is not the binding constraint — §2.3's 36.24%
+figure is a *lexicon coverage* ceiling, which is a different problem and is
+fixed by widening `--max-words`, not by more training text.
 
-| Lang | hin | mar | nep | san | kok | mai | brx | doi |
-| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| train | 1,297,699 | 1,246,308 | 2,277,802 | 1,780,680 | 460,325 | 209,691 | 34,480 | 1,276 |
-| valid | 6,357 | 7,646 | 2,804 | 3,398 | 3,502 | 3,790 | 3,068 | 0 |
-| test | 10,112 | 12,190 | 4,101 | 5,302 | 5,042 | 5,449 | 4,081 | 2,000 |
-
-Dogri has no `valid` cases at all --- too little data for a third split ---
-so its `gamma_lang` (§8.6) falls back to `gamma_auto`. It and Bodo are the two
-languages whose `in@50` generation ceiling (§2.3, §12.8) is visibly lower than
-the other six, which is what this table is for: a ranking problem is fixed by
-better features or more reranker supervision, a generation problem needs more
-raw training text, and conflating the two would send effort at the wrong
-lever.
-
-Each `test.jsonl` case carries the original Aksharantar `source` field, and
-`eval_langs` partitions it the same three ways the original single-language
-harness did:
+Each `test.jsonl` case carries the Aksharantar `source` field, and `eval_langs`
+partitions it the same three ways the original single-language harness did:
 
 | Stratum | Content |
 | :--- | :--- |
@@ -1304,17 +1346,20 @@ harness did:
 | `AK-NEI`, `AK-NEF`, `Wikidata` | named entities --- grouped as "entity" |
 | everything else | mined pairs, reported by `eval_langs --json` but not headlined |
 
-Native strata are the headline metric because they measure the intended task.
-Entity accuracy is reported alongside, in full (§2.3), never pooled into one
-"accuracy" without saying so.
+The vendored Nepali splits were cleaned down to `english word` / `native word`
+only, so `source` is absent and `prepare_pairs` is run with
+`--assume-source AK-Freq`; the whole `nep_test.json` split is AK-Freq, so the
+stratum is correct rather than assumed. The tool reports how many rows it
+filled in. Native strata are the headline metric because they measure the
+intended task. Entity accuracy is reported alongside, in full (§2.3), never
+pooled into one "accuracy" without saying so.
 
-**The lexicon's frequency text** is a separate, smaller source from the same
-family: an IndicCorp v2 sample per language (~300 MB each, pinned and
-SHA-256-verified via `scripts/data-manifest.tsv`, `make data-fetch`), not the
-113 GB full corpus --- a deliberate scope decision (this manual's minimalism
-constraint, §2) verified sufficient by the numbers in §2.3 before being
-accepted. `build_lexicon` (§8.6) counts words from it directly; Nepali also
-keeps the original 86M-token `corpus_clean.txt` via `--extra`.
+**The lexicon's frequency text** is a separate, smaller source: the same
+Nepali corpus, counted with a `count >= 2` floor and capped by `--max-words`
+(700,000, giving a 4.49 MB automaton over 105.4M tokens) --- a deliberate
+scope decision, and the whole corpus rather than a sample, since
+`data/nepali_corpus.txt` is itself the curated 1.80 GB merge described in
+`data/README.md`. `build_lexicon` (§8.6) counts it directly.
 
 **Contamination control.** `prepare_pairs`'s train/valid/test split (above) is
 the primary defence. A second, independent one guards the lexicon and corpus
@@ -1945,6 +1990,10 @@ module tests (`cargo test --release --lib`) as of this table. Diagnostics:
 
 Recorded openly. Nothing here is hidden in a footnote.
 
+Measurements that decided the current architecture — including the ones whose
+numbers contradict earlier claims in this manual — are logged with their
+method in `docs/experiments/`.
+
 ## Defects resolved in v1.2.0
 
 * **D18 --- user fuzzy path unreachable (Resolved)**: The user fuzzy band was
@@ -1997,6 +2046,30 @@ wrong for a specific input class" shape:
   out of shipped models as an apparently-unused table. `TranslitModel::
   end_weight` (§6) now applies it in the decoder's completion step. +1.2pp
   macro native top-1 (Sanskrit +3.6pp) on the eight-language validation set.
+* **D25 --- the query normalizer expands variants the decoder never reads
+  (Open).** `normalizer::expand_query_variants` produces up to
+  `QUERY_VARIANT_LIMIT` (6) cost-ordered spellings per query, but
+  `engine.rs` decodes only `query_variants.first()` — the identity — on the
+  stated grounds that "the model's learned emissions already absorb v/w and
+  vowel-length spelling variants, so re-decoding soft variants is pure latency."
+  The expansion is therefore live only for the user-learned trie and the
+  user-fuzzy path (steps 3 and 4); every cold-start candidate comes from the
+  literal query. Measured consequence: `saathi` → `साथी` ✓ because its canonical
+  form *is* the identity, while `saathee` → `साथिए` ✗ because reaching साथी needs
+  two chained rewrites (`ee→ii`, then `aa→a`) and the result is variant #3.
+  This also makes the ~500 lines of normalizer machinery (§16) almost entirely
+  inert for cold start, which is consistent with that section's own finding
+  that query-variant rewriting contributes 0.00pp — the two observations are
+  probably the same fact seen twice.
+
+  Two candidate fixes, not yet chosen: decode the top-N variants and pay ~Nx
+  latency (the stated reason for not doing so), or fold the vowel-length
+  equivalences into the *tier table* so the single decode pass scores
+  `saathee` as equivalent to `saathi` at no extra cost. The second is the one
+  the current redesign points at anyway, since it replaces the bands with a
+  scored deviation term. Pinned by
+  `vowel_length_variants_need_no_learning` in `tests/fuzzy_behavior.rs`, which
+  deliberately asserts only the case that works today so the gap cannot widen.
 * **D23 --- Sanskrit avagraha misclassified as phonetically emitting
   (Resolved).** U+093D (avagraha) and U+0900 (inverted chandrabindu) were
   segmented as their own akshara units, so the EM aligner tried to align them
@@ -2020,6 +2093,78 @@ wrong for a specific input class" shape:
 serious defects found in this system originated there. While D18 has been
 calibrated safely, full log-linear fusion remains the architectural goal.
 
+**The candidate-generation redesign is scoped, not chosen by preference.** A
+collapsed-key inverted index with SymSpell edit distance on the key was
+specified, prototyped and measured on the 4,101-case Nepali AK-Freq split
+before any of it was built (`docs/experiments/2026-10-04-canonical-key-retrieval-ceiling.md`).
+It retrieves the gold word for **49.18%** of queries, against an 82.5% gate and
+against this engine's existing **60.40%** top-1 — so it is being added *alongside*
+the lattice decoder rather than replacing it. That is a measurement, not a
+preference, and §17.2 gives the numbers.
+
+**A canonical Roman projection is not a key real users type.** This is the
+finding that shaped the retrieval redesign, and it is worth stating with the
+numbers because it is counter-intuitive. Collapsing the typed Roman and the
+word's canonical projection into a fuzzy key (§17.2's cascade) and looking it
+up in an inverted index is a *sound* candidate generator — only real words come
+back, so there are no non-word false positives, and it is cheap (1.27 words per
+collapsed key, 2.54 per consonant-skeleton key). The problem is false
+negatives. Measured on the 4,101-case Nepali AK-Freq split, against a 300k-word
+lexicon:
+
+| retrieval strategy | gold retrieved | mean candidates |
+| :--- | ---: | ---: |
+| collapsed key, exact | 32.36% | 0.7 |
+| + SymSpell delete-1 on the key | 39.01% | 3.0 |
+| + SymSpell delete-2 on the key | 39.31% | 7.9 |
+| + consonant-skeleton key (`nmst`) | 48.43% | 15.9 |
+| **delete-2 + skeleton** | **49.18%** | 23.1 |
+
+Two independent causes, and edit distance only addresses the smaller one:
+
+1. **Coverage.** 36.24% of gold words are absent from a 300k-word lexicon
+   (63.76% present). This is a hard ceiling applied before any matching, and it
+   is fixed by widening `--max-words`, not by better modelling.
+2. **The residual key misses are systematic phonological shifts, not typos.**
+   Of the cases that *are* present, 32.36% match exactly, 17.22% are 1 edit
+   away, 7.46% are 2, and **6.73% need 3 or more** — and those are things like
+   `action` → `एक्शन` (5 edits), `professor` → `प्रोफेसर` (4),
+   `administration` → `एडमिनिस्ट्रेशन` (6), `jailbata` → `जेलबाट` (4, an `ai`
+   versus `e`+`a` split). SymSpell's deletion neighbourhood cannot express a
+   substitution, which is why delete-2 reaches 39.31% rather than the 57.02%
+   that a Levenshtein-≤2 bound would allow.
+
+   Consequently **the projection is load-bearing, and the schwa rule is the
+   single most damaging line in it.** Exact collapsed-key match, by projection
+   variant:
+
+   | projection | exact key match |
+   | :--- | ---: |
+   | delete medial schwa (`नमस्ते` → `nmste`) | 15.44% |
+   | keep inherent schwa (`नमस्ते` → `namaste`, `घर` → `ghar`) | **31.63%** |
+   | + vocalic `ृ` → `ri` | 32.09% |
+   | + `a`↔`e` fold | 32.80% |
+
+   Dropping the medial-schwa rule *doubles* exact key match, +16.2pp. Further
+   folding is not the lever: vocalic-r and `a`↔`e` add ~1pp combined.
+
+**So candidate generation must union the key index with the lattice decode,
+not replace it.** The existing decoder reaches 60.40% top-1 / 77.59% top-5 on
+this same split precisely because it decodes keystrokes through the
+transliteration model and emits Devanagari, which absorbs the many-to-many
+shifts above. This is also why the earlier attempt at this failed: the removed
+corpus-wide SymSpell (§16) cost 30.79pp of native top-1, because it was scored
+in the `u64` bands rather than a unified objective. The hypothesis being tested
+now is that the same generator under log-linear fusion is a net win — which is
+exactly the §17 open limitation above.
+
+**Ranking, not retrieval, is the binding constraint on native words.** 75.9% of
+the remaining native-word errors are in-beam ties that global count features
+cannot resolve (§16, "Things that do not work as their names suggest"). A word
+log-linear scorer over the union therefore has to be paired with an
+akshara-factored matra term; four word-level features alone are the
+representation already measured to be insufficient.
+
 ## Things that do not work as their names suggest
 
 **The discriminative reranker standalone ($\gamma=1.0$) does not beat the heuristic alone.**
@@ -2042,36 +2187,39 @@ but it is not currently earning its place.
   Every prior edition of this manual through 2026-09-10 described the
   modelling core as Devanagari-script-general while conceding the shipped
   *priors* (vocabulary, suffix list) were Nepali-only in practice --- so
-  every other Devanagari language's accuracy was capped by a frequency table
-  built from a different language's corpus, however correct its phonetics
-  were. §2 and §8.6 describe the fix (one lexicon automaton, eight languages'
-  frequencies, per-language ranking); §2.3 has the current per-language
-  numbers. This bullet is kept, struck through in spirit rather than deleted,
-  because a publication citing an earlier snapshot of this system should not
-  have to guess which claim changed.
-* **Installed as one keyboard per language.** `devanagari-smart.xml` now
-  declares nine IBus engine names --- a language-blind `devanagari-smart` plus
-  `devanagari-smart-{hi,ne,mr,sa,kok,mai,brx,doi}`, each calling
-  `set_language` (§8.6, §9) on `focus_in`. This closes the previous
-  limitation (a single `<language>ne</language>` tag regardless of what the
-  model actually served) but is untested beyond the C engine's own build
-  (§15.1); no manual OS-layer verification across all nine has been logged
-  here yet.
+  * **Script-general engine, Nepali-only priors — resolved by narrowing, not by
+  widening.** Every prior edition through 2026-09-10 described the modelling
+  core as Devanagari-script-general while conceding the shipped *priors* were
+  Nepali-only in practice, so every other language's accuracy was capped by a
+  frequency table built from a different language's corpus. §2 and §8.6
+  describe the eight-language fix that followed (one lexicon automaton, eight
+  languages' frequencies, per-language ranking), and §2.3 has its numbers.
+  That edition is now retired: only the Nepali corpus and the Nepali
+  Aksharantar split are vendored, so the other seven languages' tables cannot
+  be rebuilt. The phonetic core is still script-general and `LangCond` (§8.6)
+  still conditions ranking on a language tag, but that tag can now only
+  select Nepali. Kept rather than deleted, for the same citation reason as the
+  rest of this section.
+* **~~Installed as one keyboard per language.~~** Superseded in the other
+  direction: `devanagari-smart.xml` now declares a **single** IBus engine
+  (`devanagari-smart`, Nepali). The nine-name arrangement is gone with the
+  other languages, and `src/ibus_engine.c` no longer derives a language from
+  the engine name or calls `set_language` on focus/enable.
 * **One dataset family.** Aksharantar, for training and all headline numbers.
   The Dakshina benchmark, on which IndicXlit's own headline is usually quoted,
   is still not evaluated here (§12.5).
-* **Named entities are well behind native-word accuracy in every language**
-  (§2.3): pooled entity top-1 is 31.59% against 60.69% native, and the gap is
-  not closing with more languages --- it is a feature gap (§8.2's dense
-  features are shape/frequency signals that do not model "is this plausibly a
-  name"), not a data one.
-* **Bodo and Dogri are generation-limited, not just ranking-limited**
-  (§12.1, §12.8): their `in@50` ceiling is visibly below the other six
-  languages', so more reranker supervision cannot close their gap alone ---
-  they need more clean training text before ranking improvements matter.
-* **The eight-language browser profile has not been measured for latency**
-  (§10.4 has its size, not its query cost); only the single-language figure
-  in §2 predates this overhaul.
+* **Named entities are well behind native-word accuracy** (§2.3): in the
+  retired eight-language edition, pooled entity top-1 was 31.59% against
+  60.69% native, and the gap was a feature gap (§8.2's dense features are
+  shape/frequency signals that do not model "is this plausibly a name"), not a
+  data one. Nepali entity top-1 was 34.97% against 78.32% native.
+* **Lexicon coverage, not generation, is the binding constraint on AK-Freq.**
+  Measured on the 4,101-case Nepali test split (§2.3, §17.2): at 300k words,
+  **36.24%** of gold words are absent from the automaton. Widening
+  `--max-words` to 700k is the lever; more training text is not.
+* **The browser profile has not been measured for latency** (§10.4 has its
+  size, not its query cost); the desktop figure in §2 predates the
+  Nepali-only rebuild.
 * **`--reranker-pairs 0` (the full ~7.3M-pair analogue of the old
   `train-full`) has not been retried since D19--D21 were fixed.** It was
   tested and falsified under the broken pipeline (§18.1); whether more

@@ -108,7 +108,7 @@ impl Tally {
 
 fn main() {
     let mut model_path = "data/akshar.model".to_string();
-    let mut corpus_path = "data/store/corpus_clean.txt".to_string();
+    let mut corpus_path = "data/nepali_corpus.txt".to_string();
     let mut n_sentences = 3000usize;
     let mut skip_sentences = 0usize;
     let mut topk = 5usize;
@@ -146,7 +146,7 @@ fn main() {
             "--help" | "-h" => {
                 println!("evaluate_sentences — in-context word accuracy on held-out sentences");
                 println!("  --model <path>          unified model (default data/akshar.model)");
-                println!("  --corpus <path>         corpus_clean.txt");
+                println!("  --corpus <path>         nepali_corpus.txt");
                 println!("  --n <count>             held-out sentences to score (default 3000)");
                 println!("  --topk <k>              top-k cutoff (default 5)");
                 println!("  --holdout-denom <d>     hold out 1 sentence in d (default 200)");

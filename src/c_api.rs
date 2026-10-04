@@ -151,10 +151,10 @@ pub unsafe extern "C" fn akshar_ime_confirm_word(roman: *const c_char, devanagar
     }));
 }
 
-/// Chooses the language suggestions are ranked for: an ISO 639-3 code
-/// (`"hin"`, `"nep"`, ...) or its ISO 639-1 alias (`"hi"`), or NULL / `""` /
-/// `"auto"` for language-blind ranking.  Returns 1 when the model supports
-/// the language (or auto was requested), 0 when it fell back to auto.
+/// Chooses the language suggestions are ranked for: `"nep"` or its ISO 639-1
+/// alias `"ne"`, or NULL / `""` / `"auto"` for language-blind ranking.  The
+/// engine ships Nepali-only priors, so any other code returns 0 and falls back
+/// to language-blind.  Returns 1 when the request was honoured.
 ///
 /// # Safety
 ///

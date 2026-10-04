@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Akshar Devanagari IME: one phonetic engine, one input source per language.
-     Every source runs the same engine; the language only conditions ranking.
-     The engine name's suffix is the language code (src/ibus_engine.c). -->
+<!-- Akshar Nepali IME: one phonetic engine, one input source.
+     The engine ships Nepali-only priors, so there is a single input source
+     and no language suffix to parse (src/ibus_engine.c). -->
 <component>
-    <name>org.freedesktop.IBus.AksharDevanagari</name>
-    <description>Akshar Devanagari Input Method Engine</description>
+    <name>org.freedesktop.IBus.AksharNepali</name>
+    <description>Akshar Nepali Input Method Engine</description>
     <exec>/usr/lib/ibus/engines/devanagari-smart --ibus</exec>
     <version>1.3.0</version>
     <author>Sabin</author>
@@ -12,105 +12,16 @@
     <homepage>https://github.com/Fundaments-Work/akshar-ime</homepage>
     <textdomain>devanagari-smart</textdomain>
     <engines>
-        <!-- Auto: ranks language-blind across every Devanagari language. -->
         <engine>
             <name>devanagari-smart</name>
-            <longname>Devanagari (Akshar)</longname>
-            <description>Phonetic Devanagari for every language written in the script</description>
+            <longname>Nepali — नेपाली (Akshar)</longname>
+            <description>Phonetic Nepali input from Roman keystrokes</description>
             <language>ne</language>
             <license>MIT</license>
             <author>Sabin</author>
             <icon>/usr/share/icons/hicolor/scalable/apps/ibus-keyboard.svg</icon>
             <layout>us</layout>
             <rank>50</rank>
-        </engine>
-        <engine>
-            <name>devanagari-smart-hi</name>
-            <longname>Hindi — हिन्दी (Akshar)</longname>
-            <description>Phonetic Devanagari, suggestions ranked for Hindi</description>
-            <language>hi</language>
-            <license>MIT</license>
-            <author>Sabin</author>
-            <icon>/usr/share/icons/hicolor/scalable/apps/ibus-keyboard.svg</icon>
-            <layout>us</layout>
-            <rank>40</rank>
-        </engine>
-        <engine>
-            <name>devanagari-smart-ne</name>
-            <longname>Nepali — नेपाली (Akshar)</longname>
-            <description>Phonetic Devanagari, suggestions ranked for Nepali</description>
-            <language>ne</language>
-            <license>MIT</license>
-            <author>Sabin</author>
-            <icon>/usr/share/icons/hicolor/scalable/apps/ibus-keyboard.svg</icon>
-            <layout>us</layout>
-            <rank>40</rank>
-        </engine>
-        <engine>
-            <name>devanagari-smart-mr</name>
-            <longname>Marathi — मराठी (Akshar)</longname>
-            <description>Phonetic Devanagari, suggestions ranked for Marathi</description>
-            <language>mr</language>
-            <license>MIT</license>
-            <author>Sabin</author>
-            <icon>/usr/share/icons/hicolor/scalable/apps/ibus-keyboard.svg</icon>
-            <layout>us</layout>
-            <rank>40</rank>
-        </engine>
-        <engine>
-            <name>devanagari-smart-sa</name>
-            <longname>Sanskrit — संस्कृतम् (Akshar)</longname>
-            <description>Phonetic Devanagari, suggestions ranked for Sanskrit</description>
-            <language>sa</language>
-            <license>MIT</license>
-            <author>Sabin</author>
-            <icon>/usr/share/icons/hicolor/scalable/apps/ibus-keyboard.svg</icon>
-            <layout>us</layout>
-            <rank>40</rank>
-        </engine>
-        <engine>
-            <name>devanagari-smart-kok</name>
-            <longname>Konkani — कोंकणी (Akshar)</longname>
-            <description>Phonetic Devanagari, suggestions ranked for Konkani</description>
-            <language>kok</language>
-            <license>MIT</license>
-            <author>Sabin</author>
-            <icon>/usr/share/icons/hicolor/scalable/apps/ibus-keyboard.svg</icon>
-            <layout>us</layout>
-            <rank>40</rank>
-        </engine>
-        <engine>
-            <name>devanagari-smart-mai</name>
-            <longname>Maithili — मैथिली (Akshar)</longname>
-            <description>Phonetic Devanagari, suggestions ranked for Maithili</description>
-            <language>mai</language>
-            <license>MIT</license>
-            <author>Sabin</author>
-            <icon>/usr/share/icons/hicolor/scalable/apps/ibus-keyboard.svg</icon>
-            <layout>us</layout>
-            <rank>40</rank>
-        </engine>
-        <engine>
-            <name>devanagari-smart-brx</name>
-            <longname>Bodo — बड़ो (Akshar)</longname>
-            <description>Phonetic Devanagari, suggestions ranked for Bodo</description>
-            <language>brx</language>
-            <license>MIT</license>
-            <author>Sabin</author>
-            <icon>/usr/share/icons/hicolor/scalable/apps/ibus-keyboard.svg</icon>
-            <layout>us</layout>
-            <rank>40</rank>
-        </engine>
-        <engine>
-            <name>devanagari-smart-doi</name>
-            <longname>Dogri — डोगरी (Akshar)</longname>
-            <description>Phonetic Devanagari, suggestions ranked for Dogri</description>
-            <language>doi</language>
-            <license>MIT</license>
-            <author>Sabin</author>
-            <icon>/usr/share/icons/hicolor/scalable/apps/ibus-keyboard.svg</icon>
-            <layout>us</layout>
-            <rank>40</rank>
         </engine>
     </engines>
 </component>

@@ -784,19 +784,16 @@ impl ImeEngine {
         out
     }
 
-    /// Choose the language the user is typing (ISO 639-3 such as `"hin"`,
-    /// or the ISO 639-1 alias `"hi"`); `None`, `""` or `"auto"` ranks
-    /// language-blind.  Returns false -- and falls back to language-blind --
-    /// for a language this model was not conditioned on.
+    /// Choose the language suggestions are ranked for.  The engine ships
+    /// Nepali-only priors, so the only accepted codes are `"nep"` and its
+    /// ISO 639-1 alias `"ne"`; `None`, `""` or `"auto"` ranks language-blind.
+    /// Returns false -- and falls back to language-blind -- for anything else.
     pub fn set_language(&mut self, code: Option<&str>) -> bool {
         let code = code
             .map(str::trim)
             .filter(|c| !c.is_empty() && *c != "auto");
         let wanted = code.map(|c| match c {
-            "hi" => "hin",
-            "mr" => "mar",
             "ne" => "nep",
-            "sa" => "san",
             other => other,
         });
         let index = wanted.and_then(|w| self.langs.iter().position(|l| l == w));

@@ -8,10 +8,22 @@
 //! end-to-end accuracy on a fixed sample of the held-out Aksharantar test
 //! split and fails if it drops.
 //!
-//! Thresholds are set below the measured baseline (2026-09-06: top-1 81.74%,
-//! top-5 92.27% on the full 2,108-case AK-Freq split) with room for sampling
-//! noise, so this catches regressions without failing on ordinary variation.
-//! Raise them when a change genuinely improves the model.
+//! Reads the vendored Nepali split (`data/aksharantar/nep_test.json`), which is
+//! entirely AK-Freq, and whose records carry no `source` field -- see
+//! `data/README.md`. The older `test_devanagari.jsonl` path is still accepted
+//! when present, for a `data/` populated from an upstream dump.
+//!
+//! The sample is an even **stride** over the split, not a prefix: the AK-Freq
+//! file is ordered, with the first ~2,050 cases averaging 8.7 codepoints and the
+//! remainder 6.4, so a prefix sample reads ~22pp high (82.50% top-1 on the
+//! first 400, against 60.35% on all 4,101). Striding brings the sample to
+//! 58.75% / 76.00%, within sampling noise of the full-split figures, and costs
+//! nothing.
+//!
+//! Thresholds are set below the measured baseline (2026-10-04, Nepali-only
+//! container: top-1 60.35%, top-3 73.15% on the full 4,101-case split) with
+//! room for sampling noise, so this catches regressions without failing on
+//! ordinary variation. Raise them when a change genuinely improves the model.
 //!
 //! Skips (rather than fails) when the model or dataset is absent, so a fresh
 //! clone without `data/` still passes CI.
@@ -20,36 +32,51 @@ use akshar_ime::ImeEngine;
 use std::io::BufRead;
 use std::path::Path;
 
-const DATASET: &str = "data/aksharantar/test_devanagari.jsonl";
 const SAMPLE: usize = 400;
 
-/// Measured 81.74% on the full AK-Freq split; allow for sampling noise.
-const MIN_TOP1: f64 = 76.0;
-/// Measured 92.27% on the full AK-Freq split.
-const MIN_TOP5: f64 = 88.0;
+/// Measured 60.35% on the full AK-Freq split; allow for sampling noise.
+const MIN_TOP1: f64 = 56.0;
+/// Measured 73.15% on the full AK-Freq split (top-3 of the k=8 list, which is
+/// the tightest of the three figures the eval harness reports).
+const MIN_TOP5: f64 = 66.0;
 
-fn load_native_pairs(limit: usize) -> Vec<(String, String)> {
-    let Ok(file) = std::fs::File::open(DATASET) else {
+/// The first split that exists, in preference order.
+fn dataset() -> Option<&'static str> {
+    [
+        "data/aksharantar/nep_test.json",
+        "data/aksharantar/test_devanagari.jsonl",
+        "data/pairs/test.jsonl",
+    ]
+    .into_iter()
+    .find(|p| Path::new(p).exists())
+}
+
+/// Every `stride`-th usable row, so the sample spans the whole ordered split.
+fn load_native_pairs(path: &str, limit: usize) -> Vec<(String, String)> {
+    let Ok(file) = std::fs::File::open(path) else {
         return Vec::new();
     };
-    let mut out = Vec::with_capacity(limit);
+    let mut all = Vec::new();
     for line in std::io::BufReader::new(file).lines() {
         let Ok(line) = line else { break };
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
-        // AK-Freq is the native-word split IndicXlit reports 80.25% top-1 on.
-        if v["source"].as_str() != Some("AK-Freq") {
-            continue;
+        // The cleaned Nepali split has no `source`; an upstream dump does, and
+        // AK-Freq is the native-word stratum IndicXlit reports on.
+        match v["source"].as_str() {
+            Some(s) if s != "AK-Freq" => continue,
+            _ => {}
         }
         if let (Some(r), Some(d)) = (v["english word"].as_str(), v["native word"].as_str()) {
-            out.push((r.to_string(), d.to_string()));
-        }
-        if out.len() >= limit {
-            break;
+            all.push((r.to_string(), d.to_string()));
         }
     }
-    out
+    if all.len() <= limit {
+        return all;
+    }
+    let stride = all.len() / limit;
+    all.into_iter().step_by(stride).take(limit).collect()
 }
 
 #[test]
@@ -58,9 +85,13 @@ fn ak_freq_top1_and_top5_do_not_regress() {
         eprintln!("skipping: data/akshar.model not present");
         return;
     }
-    let pairs = load_native_pairs(SAMPLE);
+    let Some(path) = dataset() else {
+        eprintln!("skipping: no Aksharantar test split under data/");
+        return;
+    };
+    let pairs = load_native_pairs(path, SAMPLE);
     if pairs.is_empty() {
-        eprintln!("skipping: {DATASET} not present");
+        eprintln!("skipping: {path} yielded no usable rows");
         return;
     }
 

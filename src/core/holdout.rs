@@ -10,7 +10,7 @@
 // held-out set spread across every source and keeps the decision stable
 // across rebuilds, reorderings and languages.
 
-/// Default: 1 sentence in 200 (~14.4k of the 2.89M in corpus_clean.txt).
+/// Default: 1 sentence in 200 (~32k of the 6.43M in data/nepali_corpus.txt).
 pub const DEFAULT_HOLDOUT_DENOM: u32 = 200;
 
 /// FNV-1a 64. Chosen over `DefaultHasher` because that one is explicitly

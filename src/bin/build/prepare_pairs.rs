@@ -7,7 +7,9 @@
 //   cargo run --release --bin prepare_pairs -- [--raw data/raw/aksharantar]
 //                                              [--out data/pairs] [--seed 7]
 //
-// Input:  <raw>/<lang>/<lang>_{train,valid,test}.json for each language below.
+// Input:  <raw>/<lang>/<lang>_{train,valid,test}.json, or the flat
+//         <raw>/<lang>_{split}.json layout of the cleaned copies in
+//         data/aksharantar/ (which omit `source`; see --assume-source).
 // Output: <out>/{train,valid,test}.jsonl, one object per line:
 //         {"english word": .., "native word": .., "source": .., "lang": ..}
 //
@@ -40,15 +42,18 @@ use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use unicode_normalization::UnicodeNormalization;
 
-/// Every language Aksharantar publishes in Devanagari (ISO 639-3 codes, as
-/// in the upstream file names).  Kashmiri and Sindhi are Perso-Arabic there.
-const LANGS: [&str; 8] = ["hin", "mar", "nep", "san", "kok", "mai", "brx", "doi"];
+/// The one language the engine ships priors for.  Aksharantar publishes eight
+/// Devanagari languages, but only the Nepali split is vendored under
+/// data/aksharantar/ and only Nepali has a running-text corpus, so the
+/// pipeline is Nepali-only.  `lang` stays on every record because the
+/// container and the eval harness are keyed by it.
+const LANG: &str = "nep";
 
 #[derive(Deserialize)]
 struct RawRecord {
@@ -115,14 +120,39 @@ fn is_clean_train_row(r: &Row) -> bool {
             .all(|c| matches!(c, '\u{0900}'..='\u{0963}'))
 }
 
-fn read_split(raw: &Path, lang: &'static str, split: &str) -> Result<Vec<Row>> {
-    let path = raw.join(lang).join(format!("{lang}_{split}.json"));
-    if !path.exists() {
-        // Dogri publishes no valid split.
-        return Ok(Vec::new());
+/// Locate one split, probing both on-disk layouts.
+///
+/// Upstream ships `data/raw/aksharantar/<lang>/<lang>_<split>.json`.  The
+/// cleaned, metadata-stripped copies committed under `data/aksharantar/` are
+/// flat and carry only `english word` / `native word`, so `source` arrives as
+/// `None` and every row would land in eval_langs' "mined" stratum.  Probing both
+/// keeps the pipeline runnable against whichever copy is present.
+fn split_path(raw: &Path, lang: &str, split: &str) -> Option<PathBuf> {
+    let nested = raw.join(lang).join(format!("{lang}_{split}.json"));
+    if nested.exists() {
+        return Some(nested);
     }
+    let flat = raw.join(format!("{lang}_{split}.json"));
+    flat.exists().then_some(flat)
+}
+
+/// Read one split.  Returns the rows plus how many had `source` filled in from
+/// `assume` -- the cleaned copies do not carry the field, and the stratum
+/// assignment in `eval_langs` is derived from it, so the count is reported
+/// rather than applied silently.
+fn read_split(
+    raw: &Path,
+    lang: &'static str,
+    split: &str,
+    assume: Option<&str>,
+) -> Result<(Vec<Row>, usize)> {
+    let Some(path) = split_path(raw, lang, split) else {
+        // Dogri publishes no valid split.
+        return Ok((Vec::new(), 0));
+    };
     let f = File::open(&path).with_context(|| format!("open {}", path.display()))?;
     let mut rows = Vec::new();
+    let mut assumed = 0usize;
     for (i, line) in BufReader::new(f).lines().enumerate() {
         let line = line.with_context(|| format!("read {}", path.display()))?;
         if line.trim().is_empty() {
@@ -130,9 +160,16 @@ fn read_split(raw: &Path, lang: &'static str, split: &str) -> Result<Vec<Row>> {
         }
         let rec: RawRecord = serde_json::from_str(&line)
             .with_context(|| format!("{}:{}: bad record", path.display(), i + 1))?;
-        rows.push(normalise(rec, lang));
+        let mut row = normalise(rec, lang);
+        if row.source == "unknown" {
+            if let Some(a) = assume {
+                row.source = a.to_string();
+                assumed += 1;
+            }
+        }
+        rows.push(row);
     }
-    Ok(rows)
+    Ok((rows, assumed))
 }
 
 fn write_split(path: &Path, rows: &[Row]) -> Result<()> {
@@ -153,32 +190,56 @@ fn write_split(path: &Path, rows: &[Row]) -> Result<()> {
 }
 
 fn main() -> Result<()> {
-    let mut raw = PathBuf::from("data/raw/aksharantar");
+    let mut raw = PathBuf::from("data/aksharantar");
     let mut out = PathBuf::from("data/pairs");
     let mut seed: u64 = 7;
+    let mut assume_source: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--raw" => raw = PathBuf::from(args.next().context("value for --raw")?),
             "--out" => out = PathBuf::from(args.next().context("value for --out")?),
             "--seed" => seed = args.next().context("value for --seed")?.parse()?,
+            "--assume-source" => {
+                assume_source = Some(args.next().context("value for --assume-source")?)
+            }
             "-h" | "--help" => {
                 println!(
-                    "prepare_pairs [--raw data/raw/aksharantar] [--out data/pairs] [--seed 7]"
+                    "prepare_pairs [--raw data/aksharantar] [--out data/pairs] [--seed 7]\n\
+                     \x20              [--assume-source AK-Freq]\n\n\
+                     Reads the vendored Nepali splits, <raw>/nep_{{train,valid,test}}.json.\n\
+                     --assume-source fills the `source` field those copies dropped, which\n\
+                     the eval harness needs to assign a stratum; the count is reported."
                 );
                 return Ok(());
             }
             other => anyhow::bail!("unknown argument: {other}"),
         }
     }
+
+    let lang = LANG;
+    anyhow::ensure!(
+        ["train", "valid", "test"]
+            .iter()
+            .any(|s| split_path(&raw, lang, s).is_some()),
+        "no Nepali splits under {} (expected {lang}_{{train,valid,test}}.json)",
+        raw.display()
+    );
+    let assume = assume_source.as_deref();
+
     std::fs::create_dir_all(&out)?;
 
     // Evaluation splits first: their native words define the hygiene filter.
     let mut valid = Vec::new();
     let mut test = Vec::new();
-    for lang in LANGS {
-        valid.extend(read_split(&raw, lang, "valid")?);
-        test.extend(read_split(&raw, lang, "test")?);
+    let mut assumed_eval = 0usize;
+    {
+        let (v, av) = read_split(&raw, lang, "valid", assume)?;
+        valid.extend(v);
+        assumed_eval += av;
+        let (t, at) = read_split(&raw, lang, "test", assume)?;
+        test.extend(t);
+        assumed_eval += at;
     }
     let held_out: HashSet<&str> = valid
         .iter()
@@ -194,21 +255,23 @@ fn main() -> Result<()> {
         evaluation_word: usize,
         kept: usize,
     }
-    let mut tally: BTreeMap<&str, Tally> = BTreeMap::new();
+    let mut tally = Tally::default();
     let mut seen: HashSet<u128> = HashSet::new();
     let mut train: Vec<Row> = Vec::new();
-    for lang in LANGS {
-        for r in read_split(&raw, lang, "train")? {
-            let t = tally.entry(lang).or_default();
-            t.read += 1;
+    let mut assumed_train = 0usize;
+    {
+        let (rows, assumed) = read_split(&raw, lang, "train", assume)?;
+        assumed_train += assumed;
+        for r in rows {
+            tally.read += 1;
             if !is_clean_train_row(&r) {
-                t.unclean += 1;
+                tally.unclean += 1;
             } else if held_out.contains(r.native.as_str()) {
-                t.evaluation_word += 1;
+                tally.evaluation_word += 1;
             } else if !seen.insert(pair_key(&r.roman, &r.native)) {
-                t.duplicate += 1;
+                tally.duplicate += 1;
             } else {
-                t.kept += 1;
+                tally.kept += 1;
                 train.push(r);
             }
         }
@@ -226,14 +289,24 @@ fn main() -> Result<()> {
         "{:<5} {:>10} {:>9} {:>10} {:>11} {:>10} {:>8} {:>8}",
         "lang", "train-read", "unclean", "duplicate", "eval-word", "train", "valid", "test"
     );
-    for lang in LANGS {
-        let t = tally
-            .get(lang)
-            .map(|t| (t.read, t.unclean, t.duplicate, t.evaluation_word, t.kept));
-        let (read, unclean, dup, ev, kept) = t.unwrap_or_default();
-        let nv = valid.iter().filter(|r| r.lang == lang).count();
-        let nt = test.iter().filter(|r| r.lang == lang).count();
-        println!("{lang:<5} {read:>10} {unclean:>9} {dup:>10} {ev:>11} {kept:>10} {nv:>8} {nt:>8}");
+    println!(
+        "{lang:<5} {:>10} {:>9} {:>10} {:>11} {:>10} {:>8} {:>8}",
+        tally.read,
+        tally.unclean,
+        tally.duplicate,
+        tally.evaluation_word,
+        tally.kept,
+        valid.len(),
+        test.len()
+    );
+    if let Some(a) = assume {
+        let total = assumed_train + assumed_eval;
+        if total > 0 {
+            println!(
+                "source field absent on {total} rows (train {assumed_train}, \
+                 valid+test {assumed_eval}); assumed \"{a}\"."
+            );
+        }
     }
     println!(
         "wrote {} train / {} valid / {} test rows to {} (train shuffled, seed {seed})",

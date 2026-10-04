@@ -111,9 +111,9 @@ impl WasmEngine {
         let _ = self.save_to_storage();
     }
 
-    /// Rank suggestions for one language: an ISO 639-3 code ("hin", "nep",
-    /// ...) or ISO 639-1 alias ("hi"); null, "" or "auto" for language-blind.
-    /// Returns false if the model does not support it (auto is used).
+    /// Rank suggestions for Nepali: "nep", or the ISO 639-1 alias "ne"; null,
+    /// "" or "auto" for language-blind.  The model ships Nepali-only priors, so
+    /// any other code returns false and language-blind ranking is used.
     #[wasm_bindgen(js_name = setLanguage)]
     pub fn set_language(&mut self, code: Option<String>) -> bool {
         self.inner.set_language(code.as_deref())

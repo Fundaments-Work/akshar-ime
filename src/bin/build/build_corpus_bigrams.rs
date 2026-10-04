@@ -12,7 +12,7 @@
 //
 // Usage:
 //   cargo run --release --bin build_corpus_bigrams -- \
-//     --corpus data/store/corpus_clean.txt --model data/akshar.model \
+//     --corpus data/nepali_corpus.txt --model data/akshar.model \
 //     --threshold 20 --out data/corpus_bigrams.bin
 //
 // `data/` is gitignored: the sidecar is built locally, never committed.
@@ -24,7 +24,7 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 fn main() {
-    let mut corpus_path = "data/store/corpus_clean.txt".to_string();
+    let mut corpus_path = "data/nepali_corpus.txt".to_string();
     let mut model_path = "data/akshar.model".to_string();
     let mut threshold = 20u32;
     let mut out_path = "data/corpus_bigrams.bin".to_string();
@@ -44,9 +44,7 @@ fn main() {
             "--out" => out_path = args.next().expect("value for --out"),
             "--help" | "-h" => {
                 println!("build_corpus_bigrams — pruned (prev, cur) count sidecar");
-                println!(
-                    "  --corpus <path>     running text (default data/store/corpus_clean.txt)"
-                );
+                println!("  --corpus <path>     running text (default data/nepali_corpus.txt)");
                 println!("  --model <path>      unified model for the vocab filter");
                 println!("  --threshold <n>     keep pairs with count >= n (default 20)");
                 println!("  --out <path>        output sidecar (default data/corpus_bigrams.bin)");

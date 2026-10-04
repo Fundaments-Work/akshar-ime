@@ -4,16 +4,14 @@
 // (src/core/lexicon.rs) the ranker and the dictionary-constrained decoder use.
 //
 //   cargo run --release --bin build_lexicon -- \
-//       [--raw data/raw/indiccorp-v2-sample] [--extra nep=data/store/corpus_clean.txt] \
+//       [--corpus data/nepali_corpus.txt] \
 //       [--min-count 2] [--max-words 300000] [--out data/lexicon.bin]
 //
-// Input: the IndicCorp v2 sample fetched by `make data-fetch` -- files
-// `<code>.<NN>.txt` (evenly spaced 25 MiB slices; their first and last lines
-// are cut mid-sentence and dropped) or `<code>.txt` (whole files).  IndicCorp
-// codes map to the ISO 639-3 codes used everywhere else.  --extra adds more
-// running text for one language (Nepali keeps the 86M-token corpus the
-// engine was built on); it honours the shared 1-in-200 sentence holdout, so
-// the sentence-level evaluation text never reaches the counts.
+// Input: the Nepali running-text corpus (--corpus), streamed line by line.
+// The engine ships Nepali-only priors, so this builds a single-language
+// lexicon; the container still reserves MAX_LANGS levels per word.
+// --corpus honours the shared 1-in-200 sentence holdout, so the
+// sentence-level evaluation text never reaches the counts.
 //
 // A token is a maximal run of Devanagari letters and signs (U+0900..U+0963)
 // after trimming punctuation, NFC-normalised, 1..=24 characters -- the same
@@ -32,20 +30,10 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use unicode_normalization::UnicodeNormalization;
 
-/// IndicCorp v2 file code -> ISO 639-3.
-fn language_of(code: &str) -> Option<&'static str> {
-    Some(match code {
-        "hi" => "hin",
-        "mr" => "mar",
-        "ne" => "nep",
-        "sa" => "san",
-        "gom" => "kok",
-        "mai" => "mai",
-        "bd" => "brx",
-        "dg" => "doi",
-        _ => return None,
-    })
-}
+/// The engine ships Nepali-only priors.  `Lexicon` still stores up to
+/// `MAX_LANGS` levels per word (src/core/lexicon.rs) so the container format is
+/// unchanged, but the pipeline populates exactly this one language.
+const LANG: &str = "nep";
 
 fn is_word_char(c: char) -> bool {
     matches!(c, '\u{0900}'..='\u{0963}')
@@ -75,23 +63,9 @@ impl Counts {
     }
 }
 
-/// Count one IndicCorp file; slices lose their (partial) first and last line.
-fn count_file(path: &Path, sliced: bool, counts: &mut Counts) -> Result<()> {
-    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
-    let text = String::from_utf8_lossy(&bytes);
-    let lines: Vec<&str> = text.lines().collect();
-    let body = if sliced && lines.len() >= 2 {
-        &lines[1..lines.len() - 1]
-    } else {
-        &lines[..]
-    };
-    for line in body {
-        counts.add_line(line);
-    }
-    Ok(())
-}
-
-fn count_extra(path: &Path, counts: &mut Counts) -> Result<()> {
+/// Count one running-text corpus, dropping the shared sentence holdout so the
+/// sentence-level evaluation text never reaches the counts.
+fn count_corpus(path: &Path, counts: &mut Counts) -> Result<()> {
     let f = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
     for line in BufReader::new(f).lines() {
         let line = line?;
@@ -103,8 +77,7 @@ fn count_extra(path: &Path, counts: &mut Counts) -> Result<()> {
 }
 
 fn main() -> Result<()> {
-    let mut raw = PathBuf::from("data/raw/indiccorp-v2-sample");
-    let mut extra: Vec<(String, PathBuf)> = Vec::new();
+    let mut corpus = PathBuf::from("data/nepali_corpus.txt");
     let mut min_count: u64 = 2;
     let mut max_words: usize = 300_000;
     let mut out = PathBuf::from("data/lexicon.bin");
@@ -112,19 +85,16 @@ fn main() -> Result<()> {
     while let Some(a) = args.next() {
         let mut val = || args.next().with_context(|| format!("value for {a}"));
         match a.as_str() {
-            "--raw" => raw = PathBuf::from(val()?),
-            "--extra" => {
-                let v = val()?;
-                let (lang, path) = v.split_once('=').context("--extra wants lang=path")?;
-                extra.push((lang.to_string(), PathBuf::from(path)));
-            }
+            "--corpus" => corpus = PathBuf::from(val()?),
             "--min-count" => min_count = val()?.parse()?,
             "--max-words" => max_words = val()?.parse()?,
             "--out" => out = PathBuf::from(val()?),
             "-h" | "--help" => {
                 println!(
-                    "build_lexicon [--raw dir] [--extra lang=path]... [--min-count 2] \
-                     [--max-words 300000] [--out path]"
+                    "build_lexicon [--corpus data/nepali_corpus.txt] [--min-count 2] \
+                     [--max-words 300000] [--out path]\n\n\
+                     Counts the Nepali running-text corpus and builds the lexicon \
+                     automaton ({LANG}-only priors)."
                 );
                 return Ok(());
             }
@@ -132,31 +102,9 @@ fn main() -> Result<()> {
         }
     }
 
-    // Group input files by language.
-    let mut files: BTreeMap<&'static str, Vec<(PathBuf, bool)>> = BTreeMap::new();
-    for entry in std::fs::read_dir(&raw).with_context(|| format!("read {}", raw.display()))? {
-        let path = entry?.path();
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        let Some(stem) = name.strip_suffix(".txt") else {
-            continue;
-        };
-        // "hi-1.03" / "mr.11" (slices) or "mai" (whole file).
-        let (code, sliced) = match stem.split_once('.') {
-            Some((c, _)) => (c.split('-').next().unwrap_or(c), true),
-            None => (stem, false),
-        };
-        if let Some(lang) = language_of(code) {
-            files.entry(lang).or_default().push((path.clone(), sliced));
-        }
-    }
+    let lang = LANG;
+    let files: BTreeMap<&'static str, Vec<PathBuf>> = BTreeMap::from([(lang, vec![corpus])]);
     let langs: Vec<&'static str> = files.keys().copied().collect();
-    anyhow::ensure!(
-        !langs.is_empty(),
-        "no IndicCorp files under {}",
-        raw.display()
-    );
     anyhow::ensure!(langs.len() <= MAX_LANGS, "more than {MAX_LANGS} languages");
 
     // Count every language in parallel.
@@ -165,16 +113,10 @@ fn main() -> Result<()> {
             .iter()
             .map(|&lang| {
                 let files = &files[lang];
-                let extra = &extra;
                 s.spawn(move || -> Result<(&str, Counts)> {
                     let mut counts = Counts::default();
-                    for (path, sliced) in files {
-                        count_file(path, *sliced, &mut counts)?;
-                    }
-                    for (l, path) in extra {
-                        if l == lang {
-                            count_extra(path, &mut counts)?;
-                        }
+                    for path in files {
+                        count_corpus(path, &mut counts)?;
                     }
                     Ok((lang, counts))
                 })

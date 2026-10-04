@@ -22,14 +22,12 @@ void akshar_ime_engine_init(void);
 void akshar_ime_engine_destroy(void);
 char *akshar_ime_get_suggestions(const char *prefix);
 void akshar_ime_confirm_word(const char *roman, const char *devanagari);
-int akshar_ime_set_language(const char *code);
 void akshar_ime_free_string(char *s);
 
-// Engine names registered with IBus (devanagari-smart.xml): the bare name is
-// "auto" (language-blind ranking); a suffix is the language the source ranks
-// for, e.g. "devanagari-smart-hi".
+// The single input source registered with IBus (devanagari-smart.xml).  The
+// engine ships Nepali-only priors, so there is no per-language variant to
+// derive from the engine name.
 #define ENGINE_BASE_NAME "devanagari-smart"
-static const char *const LANGUAGE_SUFFIXES[] = {"hi", "ne", "mr", "sa", "kok", "mai", "brx", "doi"};
 
 // --- GObject boilerplate ---
 typedef struct _IBusDevanagariEngine IBusDevanagariEngine;
@@ -290,26 +288,13 @@ static void ibus_devanagari_engine_candidate_clicked(IBusEngine *engine, guint i
     commit_preedit(self);
 }
 
-// Every input source shares one Rust engine, so each tells it its language
-// whenever it becomes the active source.
-static void apply_language(IBusEngine *engine)
-{
-    const gchar *name = ibus_engine_get_name(engine);
-    const gchar *lang = NULL;
-    if (name && g_str_has_prefix(name, ENGINE_BASE_NAME "-"))
-        lang = name + strlen(ENGINE_BASE_NAME "-");
-    akshar_ime_set_language(lang);
-}
-
 static void ibus_devanagari_engine_focus_in(IBusEngine *engine)
 {
-    apply_language(engine);
     IBUS_ENGINE_CLASS(ibus_devanagari_engine_parent_class)->focus_in(engine);
 }
 
 static void ibus_devanagari_engine_enable(IBusEngine *engine)
 {
-    apply_language(engine);
     IBUS_ENGINE_CLASS(ibus_devanagari_engine_parent_class)->enable(engine);
 }
 
@@ -382,14 +367,8 @@ int main(int argc, char **argv)
     }
     IBusFactory *factory = ibus_factory_new(ibus_bus_get_connection(bus));
     ibus_factory_add_engine(factory, ENGINE_BASE_NAME, IBUS_TYPE_DEVANAGARI_ENGINE);
-    for (gsize i = 0; i < G_N_ELEMENTS(LANGUAGE_SUFFIXES); i++)
-    {
-        gchar *name = g_strconcat(ENGINE_BASE_NAME "-", LANGUAGE_SUFFIXES[i], NULL);
-        ibus_factory_add_engine(factory, name, IBUS_TYPE_DEVANAGARI_ENGINE);
-        g_free(name);
-    }
     if (argc > 1 && strcmp(argv[1], "--ibus") == 0 &&
-        !ibus_bus_request_name(bus, "org.freedesktop.IBus.AksharDevanagari", 0))
+        !ibus_bus_request_name(bus, "org.freedesktop.IBus.AksharNepali", 0))
     {
         g_object_unref(factory);
         g_object_unref(bus);
